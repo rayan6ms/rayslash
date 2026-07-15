@@ -1,0 +1,7 @@
+{
+  "uuid": "rayslash@local",
+  "name": "RaySlash",
+  "description": "Draw an ephemeral accent-colored slash trail while dragging across the empty desktop.",
+  "shell-version": ["50"],
+  "version": 1
+}
