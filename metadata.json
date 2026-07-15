@@ -1,8 +1,8 @@
 {
-  "uuid": "rayslash@local",
+  "uuid": "rayslash@rayan6ms.github.io",
   "name": "RaySlash",
-  "description": "Draw an ephemeral accent-colored slash trail while dragging across the empty desktop.",
+  "description": "Draw a configurable, ephemeral slash trail over exposed desktop areas. Application windows remain above the effect.",
   "shell-version": ["50"],
   "settings-schema": "org.gnome.shell.extensions.rayslash",
-  "version": 2
+  "url": "https://github.com/rayan6ms/rayslash"
 }

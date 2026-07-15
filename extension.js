@@ -1,5 +1,7 @@
-import Cairo from 'cairo';
+// SPDX-License-Identifier: GPL-2.0-or-later
+// Copyright (C) 2026 Rayan (rayan6ms)
 
+import Cairo from 'cairo';
 import Clutter from 'gi://Clutter';
 import Gio from 'gi://Gio';
 import GLib from 'gi://GLib';
@@ -7,141 +9,127 @@ import St from 'gi://St';
 
 import {Extension} from 'resource:///org/gnome/shell/extensions/extension.js';
 import * as Main from 'resource:///org/gnome/shell/ui/main.js';
-import * as PanelMenu from 'resource:///org/gnome/shell/ui/panelMenu.js';
-import * as PopupMenu from 'resource:///org/gnome/shell/ui/popupMenu.js';
 
-const FRAME_INTERVAL_MS = 16;
-const MIN_POINT_DISTANCE = 2.5;
-const MAX_POINTS_PER_STROKE = 240;
-const MAX_STROKES = 8;
-const SMOOTHING_PASSES = 2;
+const FRAME_MS = 16;
+const MIN_DISTANCE = 2.5;
+const MAX_POINTS = 180;
+const MAX_STROKES = 6;
+const SMOOTH_PASSES = 2;
 
-const ACCENT_COLORS = Object.freeze({
-    blue: '#3584e4',
-    teal: '#2190a4',
-    green: '#3a944a',
-    yellow: '#c88800',
-    orange: '#ed5b00',
-    red: '#e62d42',
-    pink: '#d56199',
-    purple: '#9141ac',
-    slate: '#6f8396',
+const PALETTE = Object.freeze({
+    blue: '#3584e4', teal: '#2190a4', green: '#3a944a',
+    yellow: '#c88800', orange: '#ed5b00', red: '#e62d42',
+    pink: '#d56199', purple: '#9141ac', slate: '#6f8396',
 });
 
-const COLOR_CHOICES = Object.freeze([
-    {value: 'accent', label: 'System accent'},
-    {value: 'blue', label: 'Blue'},
-    {value: 'teal', label: 'Teal'},
-    {value: 'green', label: 'Green'},
-    {value: 'yellow', label: 'Yellow'},
-    {value: 'orange', label: 'Orange'},
-    {value: 'red', label: 'Red'},
-    {value: 'pink', label: 'Pink'},
-    {value: 'purple', label: 'Purple'},
-    {value: 'slate', label: 'Slate'},
-]);
-
-const SIZE_CHOICES = Object.freeze([
-    {value: 'thin', label: 'Thin'},
-    {value: 'medium', label: 'Medium'},
-    {value: 'bold', label: 'Bold'},
-]);
-
-const STYLE_CHOICES = Object.freeze([
-    {value: 'fruit', label: 'Fruit blade'},
-    {value: 'clean', label: 'Clean'},
-    {value: 'neon', label: 'Neon'},
-    {value: 'shadow', label: 'Shadow'},
-]);
-
-const TIMING_CHOICES = Object.freeze([
-    {value: 'quick', label: 'Quick'},
-    {value: 'balanced', label: 'Balanced'},
-    {value: 'lingering', label: 'Lingering'},
-]);
-
-const SPEED_CHOICES = Object.freeze([
-    {value: 'steady', label: 'Steady width'},
-    {value: 'responsive', label: 'Responsive'},
-    {value: 'dynamic', label: 'Dynamic'},
-]);
-
-const SIZE_PRESETS = Object.freeze({
-    thin: {
-        minWidth: 3.5,
-        maxWidth: 11.5,
-        speedWidth: 5.2,
-        headTaper: 42,
-        tailTaper: 58,
-    },
-    medium: {
-        minWidth: 5.5,
-        maxWidth: 17.5,
-        speedWidth: 7.5,
-        headTaper: 50,
-        tailTaper: 68,
-    },
-    bold: {
-        minWidth: 8,
-        maxWidth: 25,
-        speedWidth: 10,
-        headTaper: 58,
-        tailTaper: 78,
-    },
+const SIZES = Object.freeze({
+    thin: {min: 2.75, max: 8.5, speed: 4, head: 38, tail: 50},
+    medium: {min: 4.25, max: 13.5, speed: 6, head: 46, tail: 60},
+    bold: {min: 6.5, max: 20, speed: 8.5, head: 54, tail: 72},
 });
 
-const TIMING_PRESETS = Object.freeze({
-    quick: {
-        bodyLifetime: 170,
-        shadowLifetime: 300,
-    },
-    balanced: {
-        bodyLifetime: 260,
-        shadowLifetime: 470,
-    },
-    lingering: {
-        bodyLifetime: 390,
-        shadowLifetime: 720,
-    },
+const TIMINGS = Object.freeze({
+    quick: {body: 150, shadow: 270},
+    balanced: {body: 240, shadow: 430},
+    lingering: {body: 380, shadow: 680},
 });
 
-const SPEED_PRESETS = Object.freeze({
+const TRAILS = Object.freeze({
+    short: 240,
+    balanced: 420,
+    long: 650,
+});
+
+const SPEEDS = Object.freeze({
     steady: 0,
     responsive: 1,
     dynamic: 1.75,
 });
 
-function clamp(value, minimum, maximum) {
-    return Math.min(maximum, Math.max(minimum, value));
-}
+const ACTIVE_LAYERS = Object.freeze({
+    fruit: [
+        ['full', 1.32, 'tail', 0.09, 'shadow'],
+        ['middle', 1.17, 'bright', 0.11, 'body'],
+        ['full', 1, 'accent', 0.18, 'body'],
+        ['middle', 1, 'accent', 0.22, 'body'],
+        ['recent', 0.96, 'accent', 0.34, 'body'],
+        ['head', 0.62, 'bright', 0.42, 'body'],
+        ['tip', 0.15, 'core', 0.72, 'body'],
+    ],
+    clean: [
+        ['full', 1, 'accent', 0.22, 'body'],
+        ['middle', 1, 'accent', 0.30, 'body'],
+        ['recent', 1, 'accent', 0.38, 'body'],
+        ['tip', 0.16, 'core', 0.58, 'body'],
+    ],
+    neon: [
+        ['full', 1.55, 'accent', 0.07, 'body'],
+        ['middle', 1.28, 'bright', 0.11, 'body'],
+        ['recent', 0.76, 'accent', 0.72, 'body'],
+        ['tip', 0.15, 'white', 0.72, 'body'],
+    ],
+    shadow: [
+        ['full', 1.42, 'tail', 0.12, 'shadow'],
+        ['middle', 1.20, 'tail', 0.13, 'shadow'],
+        ['recent', 0.92, 'accent', 0.70, 'body'],
+        ['tip', 0.12, 'core', 0.34, 'body'],
+    ],
+});
 
-function lerp(start, end, progress) {
-    return start + (end - start) * progress;
-}
+const COMPLETED_LAYERS = Object.freeze({
+    fruit: [
+        ['full', 1.28, 'tail', 0.20, 'shadow'],
+        ['full', 1.14, 'bright', 0.16, 'body'],
+        ['full', 1, 'accent', 0.80, 'body'],
+        ['middle', 0.68, 'bright', 0.48, 'body'],
+        ['head', 0.16, 'core', 0.72, 'body'],
+    ],
+    clean: [
+        ['full', 1, 'accent', 0.88, 'body'],
+        ['head', 0.18, 'core', 0.48, 'body'],
+    ],
+    neon: [
+        ['full', 1.60, 'accent', 0.12, 'body'],
+        ['full', 1.25, 'bright', 0.19, 'body'],
+        ['full', 0.72, 'accent', 0.86, 'body'],
+        ['head', 0.16, 'white', 0.70, 'body'],
+    ],
+    shadow: [
+        ['full', 1.45, 'tail', 0.28, 'shadow'],
+        ['full', 0.90, 'accent', 0.78, 'body'],
+        ['head', 0.13, 'core', 0.36, 'body'],
+    ],
+});
 
-function smoothStep(progress) {
+const clamp = (value, minimum, maximum) =>
+    Math.min(maximum, Math.max(minimum, value));
+
+const lerp = (start, end, progress) =>
+    start + (end - start) * progress;
+
+const nowMs = () =>
+    GLib.get_monotonic_time() / 1000;
+
+const smoothStep = progress => {
     const value = clamp(progress, 0, 1);
 
     return value * value * (3 - 2 * value);
-}
+};
 
-function easeOutCubic(progress) {
-    const value = clamp(progress, 0, 1);
+const easeOutCubic = progress =>
+    1 - Math.pow(1 - clamp(progress, 0, 1), 3);
 
-    return 1 - Math.pow(1 - value, 3);
-}
+function hexToRgb(text) {
+    const hex = /^#[0-9a-f]{6}$/i.test(text)
+        ? text
+        : '#3584e4';
 
-function monotonicMilliseconds() {
-    return GLib.get_monotonic_time() / 1000;
-}
-
-function hexToRgb(hex) {
     const value = Number.parseInt(hex.slice(1), 16);
 
     return [
-        ((value >> 16) & 0xff) / 255,
-        ((value >> 8) & 0xff) / 255,
-        (value & 0xff) / 255,
+        ((value >> 16) & 255) / 255,
+        ((value >> 8) & 255) / 255,
+        (value & 255) / 255,
     ];
 }
 
@@ -153,28 +141,20 @@ function mixColor(first, second, amount) {
     ];
 }
 
-function getParent(actor) {
-    if (!actor)
-        return null;
-
-    try {
-        return actor.get_parent();
-    } catch {
-        return null;
-    }
-}
-
-function actorIsInside(actor, possibleAncestor) {
-    if (!actor || !possibleAncestor)
-        return false;
-
-    let current = actor;
-
-    for (let depth = 0; current && depth < 64; depth++) {
-        if (current === possibleAncestor)
+function actorIsInside(actor, ancestor) {
+    for (
+        let depth = 0;
+        actor && depth < 64;
+        depth++
+    ) {
+        if (actor === ancestor)
             return true;
 
-        current = getParent(current);
+        try {
+            actor = actor.get_parent();
+        } catch {
+            actor = null;
+        }
     }
 
     return false;
@@ -189,98 +169,177 @@ function interpolatePoint(first, second, progress) {
     };
 }
 
-function smoothPointsOnce(points) {
+function smoothOnce(points) {
     if (points.length < 2)
         return points.slice();
 
     const result = [{...points[0]}];
 
-    for (let index = 0; index < points.length - 1; index++) {
-        const first = points[index];
-        const second = points[index + 1];
+    for (
+        let index = 0;
+        index < points.length - 1;
+        index++
+    ) {
+        result.push(
+            interpolatePoint(
+                points[index],
+                points[index + 1],
+                0.25
+            )
+        );
 
-        result.push(interpolatePoint(first, second, 0.25));
-        result.push(interpolatePoint(first, second, 0.75));
+        result.push(
+            interpolatePoint(
+                points[index],
+                points[index + 1],
+                0.75
+            )
+        );
     }
 
-    result.push({...points[points.length - 1]});
+    result.push({...points.at(-1)});
 
     return result;
 }
 
-function smoothPoints(points, passes) {
-    let result = points.map(point => ({...point}));
+function smoothPoints(points) {
+    let result = points.map(point => ({
+        ...point,
+    }));
 
-    for (let pass = 0; pass < passes; pass++)
-        result = smoothPointsOnce(result);
+    for (
+        let pass = 0;
+        pass < SMOOTH_PASSES;
+        pass++
+    ) {
+        result = smoothOnce(result);
+    }
 
     return result;
 }
 
-function pointAtDistance(points, distances, targetDistance) {
-    if (targetDistance <= 0)
-        return {...points[0]};
-
-    const totalLength = distances[distances.length - 1];
-
-    if (targetDistance >= totalLength)
-        return {...points[points.length - 1]};
-
-    for (let index = 1; index < distances.length; index++) {
-        if (distances[index] < targetDistance)
-            continue;
-
-        const previousDistance = distances[index - 1];
-        const segmentLength = Math.max(
-            0.001,
-            distances[index] - previousDistance
-        );
-
-        const progress =
-            (targetDistance - previousDistance) /
-            segmentLength;
-
-        return interpolatePoint(
-            points[index - 1],
-            points[index],
-            progress
-        );
-    }
-
-    return {...points[points.length - 1]};
-}
-
-function pointsFromLengthFraction(points, startFraction) {
+function pointsSince(points, cutoff) {
     if (points.length < 2)
         return [];
 
-    const distances = new Array(points.length).fill(0);
+    const index = points.findIndex(
+        point => point.time >= cutoff
+    );
 
-    for (let index = 1; index < points.length; index++) {
+    if (index < 0)
+        return [];
+
+    const result = [];
+
+    if (index > 0) {
+        const first = points[index - 1];
+        const second = points[index];
+
+        result.push(
+            interpolatePoint(
+                first,
+                second,
+                clamp(
+                    (cutoff - first.time) /
+                        Math.max(
+                            1,
+                            second.time - first.time
+                        ),
+                    0,
+                    1
+                )
+            )
+        );
+    }
+
+    for (
+        let pointIndex = index;
+        pointIndex < points.length;
+        pointIndex++
+    ) {
+        result.push({
+            ...points[pointIndex],
+        });
+    }
+
+    return result;
+}
+
+function suffixByLength(points, fraction) {
+    if (
+        points.length < 2 ||
+        fraction <= 0
+    ) {
+        return points.map(point => ({
+            ...point,
+        }));
+    }
+
+    const distances =
+        new Array(points.length).fill(0);
+
+    for (
+        let index = 1;
+        index < points.length;
+        index++
+    ) {
         distances[index] =
             distances[index - 1] +
             Math.hypot(
-                points[index].x - points[index - 1].x,
-                points[index].y - points[index - 1].y
+                points[index].x -
+                    points[index - 1].x,
+                points[index].y -
+                    points[index - 1].y
             );
     }
 
-    const totalLength = distances[distances.length - 1];
+    const total = distances.at(-1);
 
-    if (totalLength < 1)
-        return points.map(point => ({...point}));
+    if (total < 1) {
+        return points.map(point => ({
+            ...point,
+        }));
+    }
 
-    const startDistance =
-        totalLength *
-        clamp(startFraction, 0, 0.99);
+    const target =
+        total * clamp(fraction, 0, 0.99);
+
+    let index = 1;
+
+    while (
+        index < distances.length &&
+        distances[index] < target
+    ) {
+        index++;
+    }
+
+    const first = points[index - 1];
+    const second =
+        points[Math.min(index, points.length - 1)];
+
+    const segment = Math.max(
+        0.001,
+        distances[index] -
+            distances[index - 1]
+    );
 
     const result = [
-        pointAtDistance(points, distances, startDistance),
+        interpolatePoint(
+            first,
+            second,
+            (target - distances[index - 1]) /
+                segment
+        ),
     ];
 
-    for (let index = 0; index < points.length; index++) {
-        if (distances[index] > startDistance)
-            result.push({...points[index]});
+    for (
+        let pointIndex = index;
+        pointIndex < points.length;
+        pointIndex++
+    ) {
+        result.push({
+            ...points[pointIndex],
+        });
     }
 
     return result;
@@ -289,610 +348,431 @@ function pointsFromLengthFraction(points, startFraction) {
 export default class RaySlashExtension extends Extension {
     enable() {
         this._strokes = [];
-        this._activeStroke = null;
+        this._active = null;
         this._dragging = false;
 
-        this._animationSourceId = 0;
-        this._capturedEventId = 0;
+        this._animationId = 0;
+        this._eventId = 0;
         this._repaintId = 0;
-        this._accentChangedId = 0;
-        this._settingsChangedId = 0;
-        this._monitorsChangedId = 0;
-
-        this._choiceItems = new Map();
-        this._choiceSubmenus = new Map();
+        this._settingsId = 0;
+        this._accentId = 0;
+        this._monitorsId = 0;
+        this._restackedId = 0;
 
         this._backgroundGroup =
-            Main.layoutManager?._backgroundGroup ?? null;
+            Main.layoutManager?._backgroundGroup ??
+            null;
 
         this._windowGroup =
             global.window_group ?? null;
 
-        if (!this._backgroundGroup || !this._windowGroup) {
+        if (
+            !this._backgroundGroup ||
+            !this._windowGroup
+        ) {
             throw new Error(
-                'RaySlash could not find the GNOME Shell ' +
-                'background/window groups'
+                'RaySlash could not find the GNOME Shell background/window groups'
             );
         }
 
         this._settings = this.getSettings();
 
-        this._interfaceSettings = new Gio.Settings({
-            schema_id: 'org.gnome.desktop.interface',
-        });
+        this._interfaceSettings =
+            new Gio.Settings({
+                schema_id:
+                    'org.gnome.desktop.interface',
+            });
 
-        this._reloadConfiguration();
+        this._reloadSettings();
 
-        this._settingsChangedId = this._settings.connect(
-            'changed',
-            () => {
-                this._reloadConfiguration();
-                this._syncMenu();
-                this._drawingArea?.queue_repaint();
-            }
-        );
-
-        this._accentChangedId =
-            this._interfaceSettings.connect(
-                'changed::accent-color',
+        this._settingsId =
+            this._settings.connect(
+                'changed',
                 () => {
-                    if (this._colorMode !== 'accent')
-                        return;
-
-                    this._updateColors();
-                    this._drawingArea?.queue_repaint();
+                    this._reloadSettings();
+                    this._drawing?.queue_repaint();
                 }
             );
 
-        this._drawingArea = new St.DrawingArea({
-            name: 'rayslashDrawingArea',
-            reactive: false,
-            can_focus: false,
-        });
-
-        this._repaintId = this._drawingArea.connect(
-            'repaint',
-            area => this._onRepaint(area)
-        );
-
-        this._windowGroup.add_child(this._drawingArea);
-
-        this._windowGroup.set_child_above_sibling(
-            this._drawingArea,
-            this._backgroundGroup
-        );
-
-        this._resizeDrawingArea();
-
-        this._monitorsChangedId =
-            Main.layoutManager.connect(
-                'monitors-changed',
-                () => this._resizeDrawingArea()
+        this._accentId =
+            this._interfaceSettings.connect(
+                'changed::accent-color',
+                () => {
+                    if (
+                        this._colorMode ===
+                        'accent'
+                    ) {
+                        this._updateColors();
+                        this._drawing
+                            ?.queue_repaint();
+                    }
+                }
             );
 
-        this._capturedEventId = global.stage.connect(
-            'captured-event',
-            (_stage, event) =>
-                this._onCapturedEvent(event)
+        this._drawing =
+            new St.DrawingArea({
+                name: 'rayslashDrawingArea',
+                reactive: false,
+                can_focus: false,
+            });
+
+        this._repaintId =
+            this._drawing.connect(
+                'repaint',
+                area => this._onRepaint(area)
+            );
+
+        this._windowGroup.add_child(
+            this._drawing
         );
 
-        this._createIndicator();
+        this._restackDrawing();
 
-        console.log(
-            `[${this.uuid}] configurable ribbon enabled ` +
-            `color=${this._colorMode} ` +
-            `size=${this._sizeName} ` +
-            `style=${this._styleName} ` +
-            `timing=${this._timingName} ` +
-            'stack=above-background-below-windows'
-        );
+        this._restackedId =
+            global.display.connect(
+                'restacked',
+                () => this._restackDrawing()
+            );
 
-        Main.notify(
-            this.metadata.name,
-            'Configurable ribbon enabled. ' +
-            'Use the top-bar menu to tune it.'
-        );
+        this._resize();
+
+        this._monitorsId =
+            Main.layoutManager.connect(
+                'monitors-changed',
+                () => this._resize()
+            );
+
+        this._eventId =
+            global.stage.connect(
+                'captured-event',
+                (_stage, event) =>
+                    this._onEvent(event)
+            );
     }
 
     disable() {
-        if (this._capturedEventId) {
+        if (this._eventId) {
             global.stage.disconnect(
-                this._capturedEventId
+                this._eventId
             );
 
-            this._capturedEventId = 0;
+            this._eventId = 0;
         }
 
-        if (this._monitorsChangedId) {
+        if (this._monitorsId) {
             Main.layoutManager.disconnect(
-                this._monitorsChangedId
+                this._monitorsId
             );
 
-            this._monitorsChangedId = 0;
+            this._monitorsId = 0;
         }
 
-        if (
-            this._settingsChangedId &&
-            this._settings
-        ) {
+        if (this._restackedId) {
+            global.display.disconnect(
+                this._restackedId
+            );
+
+            this._restackedId = 0;
+        }
+
+        if (this._settingsId) {
             this._settings.disconnect(
-                this._settingsChangedId
+                this._settingsId
             );
 
-            this._settingsChangedId = 0;
+            this._settingsId = 0;
         }
 
-        if (
-            this._accentChangedId &&
-            this._interfaceSettings
-        ) {
+        if (this._accentId) {
             this._interfaceSettings.disconnect(
-                this._accentChangedId
+                this._accentId
             );
 
-            this._accentChangedId = 0;
+            this._accentId = 0;
         }
 
-        if (this._animationSourceId) {
+        if (this._animationId) {
             GLib.Source.remove(
-                this._animationSourceId
+                this._animationId
             );
 
-            this._animationSourceId = 0;
+            this._animationId = 0;
         }
 
-        this._indicator?.destroy();
-        this._indicator = null;
-        this._indicatorIcon = null;
-        this._enabledMenuItem = null;
-
-        this._choiceItems.clear();
-        this._choiceSubmenus.clear();
-
-        if (this._drawingArea) {
+        if (this._drawing) {
             if (this._repaintId) {
-                this._drawingArea.disconnect(
+                this._drawing.disconnect(
                     this._repaintId
                 );
 
                 this._repaintId = 0;
             }
 
-            this._drawingArea.destroy();
-            this._drawingArea = null;
+            this._drawing.destroy();
         }
 
         this._strokes = [];
-        this._activeStroke = null;
+        this._active = null;
         this._dragging = false;
 
-        this._backgroundGroup = null;
-        this._windowGroup = null;
+        this._drawing = null;
         this._settings = null;
         this._interfaceSettings = null;
-
-        console.log(
-            `[${this.uuid}] configurable ribbon disabled`
-        );
+        this._backgroundGroup = null;
+        this._windowGroup = null;
     }
 
-    _reloadConfiguration() {
-        this._featureEnabled =
-            this._settings.get_boolean('enabled');
+    _reloadSettings() {
+        this._enabled =
+            this._settings.get_boolean(
+                'enabled'
+            );
 
         this._colorMode =
-            this._settings.get_string('color-mode');
+            this._settings.get_string(
+                'color-mode'
+            );
+
+        this._customColor =
+            this._settings.get_string(
+                'custom-color'
+            );
 
         this._sizeName =
-            this._settings.get_string('size-preset');
+            this._settings.get_string(
+                'size-preset'
+            );
 
         this._styleName =
-            this._settings.get_string('style');
+            this._settings.get_string(
+                'style'
+            );
 
         this._timingName =
-            this._settings.get_string('timing-preset');
+            this._settings.get_string(
+                'timing-preset'
+            );
+
+        this._trailName =
+            this._settings.get_string(
+                'trail-preset'
+            );
 
         this._speedName =
-            this._settings.get_string('speed-response');
+            this._settings.get_string(
+                'speed-response'
+            );
 
         this._size =
-            SIZE_PRESETS[this._sizeName] ??
-            SIZE_PRESETS.thin;
+            SIZES[this._sizeName] ??
+            SIZES.thin;
 
         this._timing =
-            TIMING_PRESETS[this._timingName] ??
-            TIMING_PRESETS.balanced;
+            TIMINGS[this._timingName] ??
+            TIMINGS.balanced;
 
-        this._speedResponse =
-            SPEED_PRESETS[this._speedName] ??
-            SPEED_PRESETS.responsive;
+        this._trailMs =
+            TRAILS[this._trailName] ??
+            TRAILS.balanced;
+
+        this._speedFactor =
+            SPEEDS[this._speedName] ??
+            SPEEDS.responsive;
 
         this._updateColors();
 
-        if (!this._featureEnabled)
-            this._clearStrokes();
+        if (!this._enabled)
+            this._clear();
     }
 
     _updateColors() {
-        let colorName = this._colorMode;
+        let hex;
 
-        if (colorName === 'accent') {
+        if (this._colorMode === 'accent') {
+            let name = 'blue';
+
             try {
-                colorName =
-                    this._interfaceSettings.get_string(
-                        'accent-color'
-                    );
+                name =
+                    this._interfaceSettings
+                        .get_string(
+                            'accent-color'
+                        );
             } catch (error) {
                 console.error(
-                    `[${this.uuid}] could not read ` +
-                    `accent color: ${error.message}`
+                    `[${this.uuid}] could not read accent color: ` +
+                    `${error.message}`
                 );
-
-                colorName = 'blue';
             }
-        }
 
-        const hex =
-            ACCENT_COLORS[colorName] ??
-            ACCENT_COLORS.blue;
+            hex =
+                PALETTE[name] ??
+                PALETTE.blue;
+        } else if (
+            this._colorMode === 'custom'
+        ) {
+            hex = this._customColor;
+        } else {
+            hex =
+                PALETTE[this._colorMode] ??
+                PALETTE.blue;
+        }
 
         const accent = hexToRgb(hex);
 
-        this._accentName = colorName;
-        this._accentColor = accent;
-
-        this._accentBrightColor = mixColor(
+        this._colors = {
             accent,
-            [1, 1, 1],
-            0.23
-        );
-
-        this._accentCoreColor = mixColor(
-            accent,
-            [1, 1, 1],
-            0.72
-        );
-
-        this._tailColor = mixColor(
-            accent,
-            [0.008, 0.010, 0.018],
-            0.87
-        );
+            bright: mixColor(
+                accent,
+                [1, 1, 1],
+                0.24
+            ),
+            core: mixColor(
+                accent,
+                [1, 1, 1],
+                0.72
+            ),
+            tail: mixColor(
+                accent,
+                [0.008, 0.010, 0.018],
+                0.87
+            ),
+            white: [1, 1, 1],
+        };
     }
 
-    _createIndicator() {
-        this._indicator = new PanelMenu.Button(
-            0,
-            this.metadata.name,
-            false
-        );
-
-        this._indicatorIcon = new St.Icon({
-            icon_name: 'selection-mode-symbolic',
-            style_class: 'system-status-icon',
-        });
-
-        this._indicator.add_child(
-            this._indicatorIcon
-        );
-
-        Main.panel.addToStatusArea(
-            this.uuid,
-            this._indicator
-        );
-
-        this._enabledMenuItem =
-            new PopupMenu.PopupSwitchMenuItem(
-                'Drawing enabled',
-                this._featureEnabled
-            );
-
-        this._enabledMenuItem.connect(
-            'toggled',
-            (_item, state) => {
-                this._settings.set_boolean(
-                    'enabled',
-                    state
-                );
-            }
-        );
-
-        this._indicator.menu.addMenuItem(
-            this._enabledMenuItem
-        );
-
-        this._indicator.menu.addMenuItem(
-            new PopupMenu.PopupSeparatorMenuItem()
-        );
-
-        this._addChoiceSubmenu(
-            'Color',
-            'preferences-color-symbolic',
-            'color-mode',
-            COLOR_CHOICES
-        );
-
-        this._addChoiceSubmenu(
-            'Thickness',
-            'format-line-spacing-symbolic',
-            'size-preset',
-            SIZE_CHOICES
-        );
-
-        this._addChoiceSubmenu(
-            'Style',
-            'applications-graphics-symbolic',
-            'style',
-            STYLE_CHOICES
-        );
-
-        this._addChoiceSubmenu(
-            'Fade timing',
-            'preferences-system-time-symbolic',
-            'timing-preset',
-            TIMING_CHOICES
-        );
-
-        this._addChoiceSubmenu(
-            'Speed response',
-            'speedometer-symbolic',
-            'speed-response',
-            SPEED_CHOICES
-        );
-
-        this._indicator.menu.addMenuItem(
-            new PopupMenu.PopupSeparatorMenuItem()
-        );
-
-        this._indicator.menu.addAction(
-            'Clear trails',
-            () => this._clearStrokes(),
-            'edit-clear-all-symbolic'
-        );
-
-        this._indicator.menu.addAction(
-            'Reset presets',
-            () => {
-                for (const key of [
-                    'enabled',
-                    'color-mode',
-                    'size-preset',
-                    'style',
-                    'timing-preset',
-                    'speed-response',
-                ]) {
-                    this._settings.reset(key);
-                }
-            },
-            'edit-undo-symbolic'
-        );
-
-        this._syncMenu();
-    }
-
-    _addChoiceSubmenu(
-        title,
-        iconName,
-        settingKey,
-        choices
-    ) {
-        const submenu =
-            new PopupMenu.PopupSubMenuMenuItem(
-                title,
-                true
-            );
-
-        submenu.icon.icon_name = iconName;
-
-        this._choiceSubmenus.set(settingKey, {
-            submenu,
-            title,
-            choices,
-        });
-
-        const items = new Map();
-
-        for (const choice of choices) {
-            const item =
-                new PopupMenu.PopupMenuItem(
-                    choice.label
-                );
-
-            item.connect('activate', () => {
-                this._settings.set_string(
-                    settingKey,
-                    choice.value
-                );
-            });
-
-            submenu.menu.addMenuItem(item);
-            items.set(choice.value, item);
-        }
-
-        this._choiceItems.set(settingKey, items);
-
-        this._indicator.menu.addMenuItem(
-            submenu
-        );
-    }
-
-    _syncMenu() {
-        if (!this._indicator)
-            return;
-
-        if (
-            this._enabledMenuItem?.state !==
-            this._featureEnabled
-        ) {
-            this._enabledMenuItem?.setToggleState(
-                this._featureEnabled
-            );
-        }
-
-        this._indicatorIcon.opacity =
-            this._featureEnabled ? 255 : 110;
-
-        const currentValues = new Map([
-            ['color-mode', this._colorMode],
-            ['size-preset', this._sizeName],
-            ['style', this._styleName],
-            ['timing-preset', this._timingName],
-            ['speed-response', this._speedName],
-        ]);
-
-        for (
-            const [key, details]
-            of this._choiceSubmenus
-        ) {
-            const selectedValue =
-                currentValues.get(key);
-
-            const selectedChoice =
-                details.choices.find(
-                    choice =>
-                        choice.value ===
-                        selectedValue
-                );
-
-            details.submenu.label.text =
-                selectedChoice
-                    ? `${details.title}: ` +
-                      selectedChoice.label
-                    : details.title;
-
-            for (
-                const [value, item]
-                of this._choiceItems.get(key)
-            ) {
-                item.setOrnament(
-                    value === selectedValue
-                        ? PopupMenu.Ornament.DOT
-                        : PopupMenu.Ornament.NONE
-                );
-            }
-        }
-    }
-
-    _clearStrokes() {
+    _clear() {
         this._strokes = [];
-        this._activeStroke = null;
+        this._active = null;
         this._dragging = false;
-
-        this._drawingArea?.queue_repaint();
+        this._drawing?.queue_repaint();
     }
 
-    _resizeDrawingArea() {
-        if (!this._drawingArea)
+    _restackDrawing() {
+        if (
+            !this._drawing ||
+            !this._windowGroup ||
+            !this._backgroundGroup ||
+            this._drawing.get_parent() !==
+                this._windowGroup
+        ) {
+            return;
+        }
+
+        this._windowGroup.set_child_above_sibling(
+            this._drawing,
+            this._backgroundGroup
+        );
+    }
+
+    _resize() {
+        if (!this._drawing)
             return;
 
         const [width, height] =
             global.stage.get_size();
 
-        this._drawingArea.set_position(0, 0);
-        this._drawingArea.set_size(width, height);
-        this._drawingArea.queue_repaint();
+        this._drawing.set_position(0, 0);
+        this._drawing.set_size(
+            width,
+            height
+        );
+
+        this._drawing.queue_repaint();
+        this._restackDrawing();
     }
 
-    _isEmptyDesktopAt(x, y) {
-        if (!this._featureEnabled)
+    _isDesktop(x, y) {
+        if (
+            !this._enabled ||
+            Main.overview.visible ||
+            (
+                Main.sessionMode?.isLocked ??
+                false
+            )
+        ) {
             return false;
-
-        if (Main.overview.visible)
-            return false;
-
-        if (Main.sessionMode?.isLocked ?? false)
-            return false;
-
-        let actor = null;
+        }
 
         try {
-            actor =
-                global.stage.get_actor_at_pos(
-                    Clutter.PickMode.REACTIVE,
-                    Math.floor(x),
-                    Math.floor(y)
-                );
+            const actor =
+                global.stage
+                    .get_actor_at_pos(
+                        Clutter.PickMode.REACTIVE,
+                        Math.floor(x),
+                        Math.floor(y)
+                    );
+
+            return actorIsInside(
+                actor,
+                this._backgroundGroup
+            );
         } catch (error) {
             console.error(
-                `[${this.uuid}] desktop actor ` +
-                `pick failed: ${error.message}`
+                `[${this.uuid}] desktop actor pick failed: ` +
+                `${error.message}`
             );
 
             return false;
         }
-
-        return actorIsInside(
-            actor,
-            this._backgroundGroup
-        );
     }
 
-    _onCapturedEvent(event) {
-        const eventType = event.type();
+    _onEvent(event) {
+        const type = event.type();
 
         if (
-            eventType ===
-            Clutter.EventType.BUTTON_PRESS
+            type ===
+                Clutter.EventType.BUTTON_PRESS &&
+            event.get_button() === 1
         ) {
-            if (event.get_button() !== 1)
-                return false;
+            const [x, y] =
+                event.get_coords();
 
-            const [x, y] = event.get_coords();
-
-            if (this._isEmptyDesktopAt(x, y))
-                this._startStroke(x, y);
+            if (this._isDesktop(x, y))
+                this._start(x, y);
             else
-                this._cancelActiveStroke();
+                this._cancel();
         } else if (
-            eventType ===
+            type ===
                 Clutter.EventType.MOTION &&
             this._dragging
         ) {
-            const [x, y] = event.get_coords();
+            const [x, y] =
+                event.get_coords();
 
             if (
                 Main.overview.visible ||
-                (Main.sessionMode?.isLocked ?? false)
+                (
+                    Main.sessionMode?.isLocked ??
+                    false
+                )
             ) {
-                this._finishStroke(
-                    'shell mode changed'
-                );
-
-                return false;
+                this._finish();
+            } else {
+                this._append(x, y);
             }
-
-            this._appendPoint(x, y);
         } else if (
-            eventType ===
-            Clutter.EventType.BUTTON_RELEASE
+            type ===
+                Clutter.EventType.BUTTON_RELEASE &&
+            event.get_button() === 1 &&
+            this._dragging
         ) {
-            if (event.get_button() !== 1)
-                return false;
+            const [x, y] =
+                event.get_coords();
 
-            if (this._dragging) {
-                const [x, y] =
-                    event.get_coords();
-
-                this._appendPoint(x, y);
-
-                this._finishStroke(
-                    'button release'
-                );
-            }
+            this._append(x, y);
+            this._finish();
         }
 
         return false;
     }
 
-    _startStroke(x, y) {
-        const now = monotonicMilliseconds();
-
+    _start(x, y) {
         const stroke = {
             points: [{
                 x,
                 y,
-                width: this._size.minWidth,
-                time: now,
+                width: this._size.min,
+                time: nowMs(),
             }],
             endedAt: null,
         };
@@ -910,156 +790,208 @@ export default class RaySlashExtension extends Extension {
             );
         }
 
-        this._activeStroke = stroke;
+        this._active = stroke;
         this._dragging = true;
+        this._ensureAnimation();
     }
 
-    _cancelActiveStroke() {
-        this._activeStroke = null;
+    _cancel() {
+        if (this._active) {
+            const index =
+                this._strokes.indexOf(
+                    this._active
+                );
+
+            if (index >= 0)
+                this._strokes.splice(index, 1);
+        }
+
+        this._active = null;
         this._dragging = false;
     }
 
-    _finishStroke(reason) {
-        const stroke = this._activeStroke;
-
-        if (!stroke) {
-            this._dragging = false;
+    _finish() {
+        if (!this._active)
             return;
-        }
 
-        if (stroke.points.length < 2) {
+        const time = nowMs();
+
+        const points = pointsSince(
+            this._active.points,
+            time - this._trailMs
+        );
+
+        if (points.length < 2) {
             const index =
-                this._strokes.indexOf(stroke);
+                this._strokes.indexOf(
+                    this._active
+                );
 
             if (index >= 0)
                 this._strokes.splice(index, 1);
         } else {
-            stroke.endedAt =
-                monotonicMilliseconds();
-
-            this._ensureAnimationSource();
+            this._active.points = points;
+            this._active.endedAt = time;
         }
 
-        console.log(
-            `[${this.uuid}] ribbon ended ` +
-            `reason=${JSON.stringify(reason)} ` +
-            `points=${stroke.points.length}`
-        );
-
-        this._activeStroke = null;
+        this._active = null;
         this._dragging = false;
 
-        this._drawingArea?.queue_repaint();
+        this._drawing?.queue_repaint();
+        this._ensureAnimation();
     }
 
-    _appendPoint(x, y) {
-        const stroke = this._activeStroke;
-
-        if (!stroke)
+    _append(x, y) {
+        if (!this._active)
             return;
 
-        const points = stroke.points;
+        const points =
+            this._active.points;
+
         const previous =
-            points[points.length - 1];
+            points.at(-1);
 
-        const now = monotonicMilliseconds();
+        const time = nowMs();
 
-        const dx = x - previous.x;
-        const dy = y - previous.y;
-        const distance = Math.hypot(dx, dy);
-
-        if (distance < MIN_POINT_DISTANCE)
-            return;
-
-        const elapsed =
-            Math.max(
-                1,
-                now - previous.time
-            );
-
-        const speed = distance / elapsed;
-
-        const speedContribution =
-            speed *
-            this._size.speedWidth *
-            this._speedResponse;
-
-        const targetWidth = clamp(
-            this._size.minWidth +
-                speedContribution,
-            this._size.minWidth,
-            this._size.maxWidth
+        const elapsed = Math.max(
+            1,
+            time - previous.time
         );
 
-        const width = lerp(
-            previous.width,
-            targetWidth,
-            0.28
+        if (elapsed > this._trailMs) {
+            this._active.points = [{
+                x,
+                y,
+                width: this._size.min,
+                time,
+            }];
+
+            this._drawing?.queue_repaint();
+            return;
+        }
+
+        const distance = Math.hypot(
+            x - previous.x,
+            y - previous.y
+        );
+
+        if (distance < MIN_DISTANCE)
+            return;
+
+        const target = clamp(
+            this._size.min +
+                distance /
+                    elapsed *
+                    this._size.speed *
+                    this._speedFactor,
+            this._size.min,
+            this._size.max
         );
 
         points.push({
             x,
             y,
-            width,
-            time: now,
+            width: lerp(
+                previous.width,
+                target,
+                0.28
+            ),
+            time,
         });
 
-        if (
-            points.length >
-            MAX_POINTS_PER_STROKE
-        ) {
-            this._decimateStroke(stroke);
-        }
-
-        this._drawingArea?.queue_repaint();
+        this._trimActive(time);
+        this._drawing?.queue_repaint();
+        this._ensureAnimation();
     }
 
-    _decimateStroke(stroke) {
-        const points = stroke.points;
-        const reduced = [points[0]];
-
-        for (
-            let index = 2;
-            index < points.length - 1;
-            index += 2
-        ) {
-            reduced.push(points[index]);
-        }
-
-        reduced.push(
-            points[points.length - 1]
-        );
-
-        stroke.points = reduced;
-    }
-
-    _ensureAnimationSource() {
-        if (this._animationSourceId)
+    _trimActive(time) {
+        if (!this._active)
             return;
 
-        this._animationSourceId =
+        const points =
+            this._active.points;
+
+        const cutoff =
+            time - this._trailMs;
+
+        while (
+            points.length > 2 &&
+            points[1].time < cutoff
+        ) {
+            points.shift();
+        }
+
+        if (points.length > MAX_POINTS) {
+            const reduced = [points[0]];
+
+            for (
+                let index = 2;
+                index < points.length - 1;
+                index += 2
+            ) {
+                reduced.push(points[index]);
+            }
+
+            reduced.push(points.at(-1));
+            this._active.points = reduced;
+        }
+    }
+
+    _ensureAnimation() {
+        if (this._animationId)
+            return;
+
+        this._animationId =
             GLib.timeout_add(
                 GLib.PRIORITY_DEFAULT,
-                FRAME_INTERVAL_MS,
+                FRAME_MS,
                 () => {
-                    const now =
-                        monotonicMilliseconds();
+                    const time = nowMs();
 
-                    this._pruneStrokes(now);
+                    this._trimActive(time);
 
-                    this._drawingArea
-                        ?.queue_repaint();
+                    const maxLifetime =
+                        Math.max(
+                            this._timing.body,
+                            this._timing.shadow
+                        );
+
+                    this._strokes =
+                        this._strokes.filter(
+                            stroke =>
+                                stroke ===
+                                    this._active ||
+                                (
+                                    stroke.endedAt !==
+                                        null &&
+                                    time -
+                                        stroke.endedAt <
+                                        maxLifetime
+                                )
+                        );
+
+                    this._drawing?.queue_repaint();
+
+                    const activeVisible =
+                        this._active &&
+                        pointsSince(
+                            this._active.points,
+                            time -
+                                this._trailMs
+                        ).length >= 2;
+
+                    const completedVisible =
+                        this._strokes.some(
+                            stroke =>
+                                stroke !==
+                                this._active
+                        );
 
                     if (
-                        this._strokes.every(
-                            stroke =>
-                                stroke.endedAt ===
-                                null
-                        ) ||
-                        this._strokes.length === 0
+                        !activeVisible &&
+                        !completedVisible
                     ) {
-                        this._animationSourceId = 0;
-
+                        this._animationId = 0;
                         return GLib.SOURCE_REMOVE;
                     }
 
@@ -1068,44 +1000,76 @@ export default class RaySlashExtension extends Extension {
             );
     }
 
-    _pruneStrokes(now) {
-        const maximumLifetime = Math.max(
-            this._timing.bodyLifetime,
-            this._timing.shadowLifetime
-        );
-
-        this._strokes =
-            this._strokes.filter(stroke => {
-                if (
-                    stroke === this._activeStroke ||
-                    stroke.endedAt === null
-                ) {
-                    return true;
-                }
-
-                return (
-                    now - stroke.endedAt <
-                    maximumLifetime
-                );
-            });
-    }
-
-    _fadeForStroke(stroke, now, lifetime) {
+    _fade(stroke, time, lifetime) {
         if (stroke.endedAt === null)
             return 1;
 
         const elapsed =
-            now - stroke.endedAt;
+            time - stroke.endedAt;
 
-        if (elapsed >= lifetime)
-            return 0;
+        return elapsed >= lifetime
+            ? 0
+            : 1 -
+                easeOutCubic(
+                    elapsed / lifetime
+                );
+    }
 
-        const progress = elapsed / lifetime;
+    _sourcesForActive(stroke, time) {
+        const source = fraction =>
+            smoothPoints(
+                pointsSince(
+                    stroke.points,
+                    time -
+                        this._trailMs *
+                            fraction
+                )
+            );
 
-        return 1 - easeOutCubic(progress);
+        const head = source(0.18);
+
+        return {
+            full: source(1),
+            middle: source(0.68),
+            recent: source(0.38),
+            head,
+            tip: suffixByLength(
+                head,
+                0.48
+            ),
+        };
+    }
+
+    _sourcesForCompleted(points) {
+        return {
+            full: points,
+            middle: suffixByLength(
+                points,
+                0.30
+            ),
+            recent: suffixByLength(
+                points,
+                0.58
+            ),
+            head: suffixByLength(
+                points,
+                0.60
+            ),
+            tip: suffixByLength(
+                points,
+                0.78
+            ),
+        };
     }
 
     _onRepaint(area) {
+        /*
+         * Window creation and focus changes can reorder the window group.
+         * Reassert the wallpaper-adjacent position before every visible
+         * frame so application windows always remain above RaySlash.
+         */
+        this._restackDrawing();
+
         const cr = area.get_context();
 
         try {
@@ -1123,243 +1087,83 @@ export default class RaySlashExtension extends Extension {
                 Cairo.Antialias.BEST
             );
 
-            const now =
-                monotonicMilliseconds();
+            const time = nowMs();
 
-            for (const stroke of this._strokes) {
+            for (
+                const stroke of this._strokes
+            ) {
                 if (stroke.points.length < 2)
                     continue;
 
-                const smoothed = smoothPoints(
-                    stroke.points,
-                    SMOOTHING_PASSES
-                );
+                const active =
+                    stroke === this._active;
 
-                this._drawConfiguredStyle(
-                    cr,
-                    smoothed,
-                    stroke,
-                    now
-                );
+                const sources = active
+                    ? this._sourcesForActive(
+                        stroke,
+                        time
+                    )
+                    : this._sourcesForCompleted(
+                        smoothPoints(
+                            stroke.points
+                        )
+                    );
+
+                const layers =
+                    (
+                        active
+                            ? ACTIVE_LAYERS
+                            : COMPLETED_LAYERS
+                    )[this._styleName] ??
+                    (
+                        active
+                            ? ACTIVE_LAYERS.fruit
+                            : COMPLETED_LAYERS.fruit
+                    );
+
+                const bodyFade = active
+                    ? 1
+                    : this._fade(
+                        stroke,
+                        time,
+                        this._timing.body
+                    );
+
+                const shadowFade = active
+                    ? 1
+                    : this._fade(
+                        stroke,
+                        time,
+                        this._timing.shadow
+                    );
+
+                for (
+                    const [
+                        sourceName,
+                        width,
+                        colorName,
+                        alpha,
+                        fadeName,
+                    ] of layers
+                ) {
+                    this._drawRibbon(
+                        cr,
+                        sources[sourceName] ?? [],
+                        width,
+                        this._colors[colorName],
+                        alpha *
+                            (
+                                fadeName ===
+                                    'shadow'
+                                    ? shadowFade
+                                    : bodyFade
+                            )
+                    );
+                }
             }
         } finally {
             cr.$dispose();
         }
-    }
-
-    _drawConfiguredStyle(
-        cr,
-        points,
-        stroke,
-        now
-    ) {
-        const bodyFade =
-            this._fadeForStroke(
-                stroke,
-                now,
-                this._timing.bodyLifetime
-            );
-
-        const shadowFade =
-            this._fadeForStroke(
-                stroke,
-                now,
-                this._timing.shadowLifetime
-            );
-
-        switch (this._styleName) {
-        case 'clean':
-            this._drawCleanStyle(
-                cr,
-                points,
-                bodyFade
-            );
-
-            break;
-
-        case 'neon':
-            this._drawNeonStyle(
-                cr,
-                points,
-                bodyFade
-            );
-
-            break;
-
-        case 'shadow':
-            this._drawShadowStyle(
-                cr,
-                points,
-                bodyFade,
-                shadowFade
-            );
-
-            break;
-
-        case 'fruit':
-        default:
-            this._drawFruitStyle(
-                cr,
-                points,
-                bodyFade,
-                shadowFade
-            );
-
-            break;
-        }
-    }
-
-    _drawFruitStyle(
-        cr,
-        points,
-        bodyFade,
-        shadowFade
-    ) {
-        this._drawRibbon(
-            cr,
-            points,
-            1.30,
-            this._tailColor,
-            0.22 * shadowFade
-        );
-
-        this._drawRibbon(
-            cr,
-            points,
-            1.16,
-            this._accentBrightColor,
-            0.18 * bodyFade
-        );
-
-        this._drawRibbon(
-            cr,
-            points,
-            1,
-            this._accentColor,
-            0.82 * bodyFade
-        );
-
-        this._drawRibbon(
-            cr,
-            pointsFromLengthFraction(
-                points,
-                0.28
-            ),
-            0.72,
-            this._accentBrightColor,
-            0.52 * bodyFade
-        );
-
-        this._drawRibbon(
-            cr,
-            pointsFromLengthFraction(
-                points,
-                0.58
-            ),
-            0.19,
-            this._accentCoreColor,
-            0.76 * bodyFade
-        );
-    }
-
-    _drawCleanStyle(
-        cr,
-        points,
-        bodyFade
-    ) {
-        this._drawRibbon(
-            cr,
-            points,
-            1,
-            this._accentColor,
-            0.88 * bodyFade
-        );
-
-        this._drawRibbon(
-            cr,
-            pointsFromLengthFraction(
-                points,
-                0.46
-            ),
-            0.18,
-            this._accentCoreColor,
-            0.48 * bodyFade
-        );
-    }
-
-    _drawNeonStyle(
-        cr,
-        points,
-        bodyFade
-    ) {
-        this._drawRibbon(
-            cr,
-            points,
-            1.70,
-            this._accentColor,
-            0.13 * bodyFade
-        );
-
-        this._drawRibbon(
-            cr,
-            points,
-            1.30,
-            this._accentBrightColor,
-            0.21 * bodyFade
-        );
-
-        this._drawRibbon(
-            cr,
-            points,
-            0.72,
-            this._accentColor,
-            0.88 * bodyFade
-        );
-
-        this._drawRibbon(
-            cr,
-            pointsFromLengthFraction(
-                points,
-                0.38
-            ),
-            0.16,
-            [1, 1, 1],
-            0.72 * bodyFade
-        );
-    }
-
-    _drawShadowStyle(
-        cr,
-        points,
-        bodyFade,
-        shadowFade
-    ) {
-        this._drawRibbon(
-            cr,
-            points,
-            1.55,
-            this._tailColor,
-            0.30 * shadowFade
-        );
-
-        this._drawRibbon(
-            cr,
-            points,
-            0.90,
-            this._accentColor,
-            0.80 * bodyFade
-        );
-
-        this._drawRibbon(
-            cr,
-            pointsFromLengthFraction(
-                points,
-                0.55
-            ),
-            0.13,
-            this._accentCoreColor,
-            0.38 * bodyFade
-        );
     }
 
     _drawRibbon(
@@ -1376,14 +1180,12 @@ export default class RaySlashExtension extends Extension {
             return;
         }
 
-        const count = points.length;
-
         const distances =
-            new Array(count).fill(0);
+            new Array(points.length).fill(0);
 
         for (
             let index = 1;
-            index < count;
+            index < points.length;
             index++
         ) {
             distances[index] =
@@ -1396,31 +1198,30 @@ export default class RaySlashExtension extends Extension {
                 );
         }
 
-        const totalLength =
-            distances[count - 1];
+        const total = distances.at(-1);
 
-        if (totalLength < 1)
+        if (total < 1)
             return;
 
-        const headTaperLength = Math.min(
-            this._size.headTaper,
-            totalLength * 0.48
+        const headLength = Math.min(
+            this._size.head,
+            total * 0.48
         );
 
-        const tailTaperLength = Math.min(
-            this._size.tailTaper,
-            totalLength * 0.48
+        const tailLength = Math.min(
+            this._size.tail,
+            total * 0.48
         );
 
-        const leftEdge = [];
-        const rightEdge = [];
+        const left = [];
+        const right = [];
 
-        let previousNormalX = 0;
-        let previousNormalY = 1;
+        let normalX = 0;
+        let normalY = 1;
 
         for (
             let index = 0;
-            index < count;
+            index < points.length;
             index++
         ) {
             const previous =
@@ -1431,7 +1232,7 @@ export default class RaySlashExtension extends Extension {
             const next =
                 points[
                     Math.min(
-                        count - 1,
+                        points.length - 1,
                         index + 1
                     )
                 ];
@@ -1442,106 +1243,91 @@ export default class RaySlashExtension extends Extension {
             const tangentY =
                 next.y - previous.y;
 
-            const tangentLength =
-                Math.hypot(
-                    tangentX,
-                    tangentY
-                );
+            const length = Math.hypot(
+                tangentX,
+                tangentY
+            );
 
-            let normalX = previousNormalX;
-            let normalY = previousNormalY;
-
-            if (tangentLength > 0.001) {
+            if (length > 0.001) {
                 normalX =
-                    -tangentY /
-                    tangentLength;
+                    -tangentY / length;
 
                 normalY =
-                    tangentX /
-                    tangentLength;
-
-                previousNormalX = normalX;
-                previousNormalY = normalY;
+                    tangentX / length;
             }
 
-            const distanceFromTail =
-                distances[index];
-
-            const distanceFromHead =
-                totalLength -
-                distances[index];
-
-            const tailTaper = smoothStep(
-                distanceFromTail /
-                    Math.max(
-                        1,
-                        tailTaperLength
-                    )
+            const taper = Math.min(
+                smoothStep(
+                    distances[index] /
+                        Math.max(
+                            1,
+                            tailLength
+                        )
+                ),
+                smoothStep(
+                    (
+                        total -
+                        distances[index]
+                    ) /
+                        Math.max(
+                            1,
+                            headLength
+                        )
+                )
             );
 
-            const headTaper = smoothStep(
-                distanceFromHead /
-                    Math.max(
-                        1,
-                        headTaperLength
-                    )
-            );
-
-            const halfWidth =
+            const half =
                 points[index].width *
                 widthMultiplier *
-                Math.min(
-                    tailTaper,
-                    headTaper
-                ) /
+                taper /
                 2;
 
-            leftEdge.push({
+            left.push({
                 x:
                     points[index].x +
-                    normalX * halfWidth,
+                    normalX * half,
                 y:
                     points[index].y +
-                    normalY * halfWidth,
+                    normalY * half,
             });
 
-            rightEdge.push({
+            right.push({
                 x:
                     points[index].x -
-                    normalX * halfWidth,
+                    normalX * half,
                 y:
                     points[index].y -
-                    normalY * halfWidth,
+                    normalY * half,
             });
         }
 
         cr.newPath();
 
         cr.moveTo(
-            leftEdge[0].x,
-            leftEdge[0].y
+            left[0].x,
+            left[0].y
         );
 
         for (
             let index = 1;
-            index < leftEdge.length;
+            index < left.length;
             index++
         ) {
             cr.lineTo(
-                leftEdge[index].x,
-                leftEdge[index].y
+                left[index].x,
+                left[index].y
             );
         }
 
         for (
             let index =
-                rightEdge.length - 1;
+                right.length - 1;
             index >= 0;
             index--
         ) {
             cr.lineTo(
-                rightEdge[index].x,
-                rightEdge[index].y
+                right[index].x,
+                right[index].y
             );
         }
 
