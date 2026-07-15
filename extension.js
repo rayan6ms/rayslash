@@ -8,40 +8,23 @@ import St from 'gi://St';
 import {Extension} from 'resource:///org/gnome/shell/extensions/extension.js';
 import * as Main from 'resource:///org/gnome/shell/ui/main.js';
 
-/*
- * Animation timing.
- */
 const FRAME_INTERVAL_MS = 16;
-const MAIN_LIFETIME_MS = 240;
-const TAIL_LIFETIME_MS = 680;
+const MAIN_LIFETIME_MS = 270;
+const TAIL_LIFETIME_MS = 760;
 
-/*
- * Pointer sampling and smoothing.
- */
 const MIN_POINT_DISTANCE = 3;
-const MAX_POINTS_PER_STROKE = 128;
-const MAX_STROKES = 8;
+const MAX_POINTS_PER_STROKE = 112;
+const MAX_STROKES = 6;
 const SMOOTHING_PASSES = 2;
 
-/*
- * Ribbon geometry.
- */
 const MIN_BLADE_WIDTH = 8;
 const MAX_BLADE_WIDTH = 30;
 const WIDTH_SPEED_MULTIPLIER = 12;
-const WIDTH_SMOOTHING = 0.35;
+const WIDTH_SMOOTHING = 0.32;
 
-const HEAD_TAPER_LENGTH = 62;
-const TAIL_TAPER_LENGTH = 52;
+const HEAD_TAPER_LENGTH = 58;
+const TAIL_TAPER_LENGTH = 72;
 
-/*
- * The dark afterimage is slightly wider than the accent blade.
- */
-const TAIL_WIDTH_MULTIPLIER = 1.4;
-
-/*
- * Official GNOME/libadwaita system accent colors.
- */
 const ACCENT_COLORS = Object.freeze({
     blue: '#3584e4',
     teal: '#2190a4',
@@ -53,6 +36,13 @@ const ACCENT_COLORS = Object.freeze({
     purple: '#9141ac',
     slate: '#6f8396',
 });
+
+const DARK_TAIL_WINDOWS = Object.freeze([
+    {minAge: 35, maxAge: 760, width: 1.70, alpha: 0.070},
+    {minAge: 65, maxAge: 600, width: 1.58, alpha: 0.080},
+    {minAge: 100, maxAge: 470, width: 1.48, alpha: 0.090},
+    {minAge: 145, maxAge: 350, width: 1.38, alpha: 0.105},
+]);
 
 function clamp(value, minimum, maximum) {
     return Math.min(maximum, Math.max(minimum, value));
@@ -79,6 +69,14 @@ function hexToRgb(hex) {
         ((value >> 16) & 0xff) / 255,
         ((value >> 8) & 0xff) / 255,
         (value & 0xff) / 255,
+    ];
+}
+
+function mixColor(first, second, amount) {
+    return [
+        lerp(first[0], second[0], amount),
+        lerp(first[1], second[1], amount),
+        lerp(first[2], second[2], amount),
     ];
 }
 
@@ -109,9 +107,6 @@ function actorIsInside(actor, possibleAncestor) {
     return false;
 }
 
-/*
- * Interpolate every property needed by the ribbon renderer.
- */
 function interpolatePoint(first, second, progress) {
     return {
         x: lerp(first.x, second.x, progress),
@@ -121,20 +116,11 @@ function interpolatePoint(first, second, progress) {
     };
 }
 
-/*
- * One Chaikin pass replaces each line segment with two points located at
- * one-quarter and three-quarters of the segment.
- *
- * Repeating this operation creates a smooth curve while preserving the first
- * and last positions of the stroke.
- */
 function smoothPointsOnce(points) {
     if (points.length < 2)
         return points.slice();
 
-    const result = [{
-        ...points[0],
-    }];
+    const result = [{...points[0]}];
 
     for (let index = 0; index < points.length - 1; index++) {
         const first = points[index];
@@ -144,20 +130,73 @@ function smoothPointsOnce(points) {
         result.push(interpolatePoint(first, second, 0.75));
     }
 
-    result.push({
-        ...points[points.length - 1],
-    });
+    result.push({...points[points.length - 1]});
 
     return result;
 }
 
 function smoothPoints(points, passes) {
-    let result = points.map(point => ({
-        ...point,
-    }));
+    let result = points.map(point => ({...point}));
 
     for (let pass = 0; pass < passes; pass++)
         result = smoothPointsOnce(result);
+
+    return result;
+}
+
+function pointsInTimeWindow(points, startTime, endTime) {
+    if (points.length < 2 || endTime <= startTime)
+        return [];
+
+    const firstTime = points[0].time;
+    const lastTime = points[points.length - 1].time;
+
+    if (lastTime < startTime || firstTime > endTime)
+        return [];
+
+    const result = [];
+
+    for (let index = 0; index < points.length - 1; index++) {
+        const first = points[index];
+        const second = points[index + 1];
+
+        if (second.time < startTime)
+            continue;
+
+        if (first.time > endTime)
+            break;
+
+        if (result.length === 0) {
+            if (startTime > first.time && startTime < second.time) {
+                const duration = Math.max(1, second.time - first.time);
+
+                result.push(interpolatePoint(
+                    first,
+                    second,
+                    (startTime - first.time) / duration
+                ));
+            } else if (first.time >= startTime) {
+                result.push({...first});
+            }
+        }
+
+        if (second.time <= endTime) {
+            result.push({...second});
+            continue;
+        }
+
+        if (endTime > first.time && endTime < second.time) {
+            const duration = Math.max(1, second.time - first.time);
+
+            result.push(interpolatePoint(
+                first,
+                second,
+                (endTime - first.time) / duration
+            ));
+        }
+
+        break;
+    }
 
     return result;
 }
@@ -177,24 +216,28 @@ export default class RaySlashExtension extends Extension {
         this._backgroundGroup =
             Main.layoutManager?._backgroundGroup ?? null;
 
+        this._windowGroup = global.window_group ?? null;
+
+        if (!this._backgroundGroup || !this._windowGroup) {
+            throw new Error(
+                'RaySlash could not find the GNOME Shell background/window groups'
+            );
+        }
+
         this._interfaceSettings = new Gio.Settings({
             schema_id: 'org.gnome.desktop.interface',
         });
 
-        this._updateAccentColor();
+        this._updateAccentColors();
 
         this._accentChangedId = this._interfaceSettings.connect(
             'changed::accent-color',
             () => {
-                this._updateAccentColor();
+                this._updateAccentColors();
                 this._drawingArea?.queue_repaint();
             }
         );
 
-        /*
-         * This surface is purely visual. Because it is non-reactive, it
-         * cannot become the pointer target or block normal desktop input.
-         */
         this._drawingArea = new St.DrawingArea({
             name: 'rayslashDrawingArea',
             reactive: false,
@@ -206,10 +249,15 @@ export default class RaySlashExtension extends Extension {
             area => this._onRepaint(area)
         );
 
-        Main.uiGroup.add_child(this._drawingArea);
-        Main.uiGroup.set_child_above_sibling(
+        /*
+         * Put RaySlash immediately above the desktop backgrounds, inside
+         * Mutter's window group. Normal windows remain above this actor, so
+         * the blade is visible on wallpaper but is naturally occluded by apps.
+         */
+        this._windowGroup.add_child(this._drawingArea);
+        this._windowGroup.set_child_above_sibling(
             this._drawingArea,
-            null
+            this._backgroundGroup
         );
 
         this._resizeDrawingArea();
@@ -225,14 +273,14 @@ export default class RaySlashExtension extends Extension {
         );
 
         console.log(
-            `[${this.uuid}] curved ribbon prototype enabled ` +
+            `[${this.uuid}] layered ribbon enabled ` +
             `accent=${this._accentName} ` +
-            `backgroundGroup=${this._backgroundGroup !== null}`
+            'stack=above-background-below-windows'
         );
 
         Main.notify(
             this.metadata.name,
-            'Curved ribbon prototype enabled. Drag across the desktop.'
+            'Layered ribbon enabled. Windows now occlude the blade.'
         );
     }
 
@@ -272,14 +320,18 @@ export default class RaySlashExtension extends Extension {
         this._dragging = false;
 
         this._backgroundGroup = null;
+        this._windowGroup = null;
         this._interfaceSettings = null;
         this._accentColor = null;
+        this._accentGlowColor = null;
+        this._accentCoreColor = null;
+        this._tailColor = null;
         this._accentName = null;
 
-        console.log(`[${this.uuid}] curved ribbon prototype disabled`);
+        console.log(`[${this.uuid}] layered ribbon disabled`);
     }
 
-    _updateAccentColor() {
+    _updateAccentColors() {
         let accentName = 'blue';
 
         try {
@@ -296,8 +348,13 @@ export default class RaySlashExtension extends Extension {
             ACCENT_COLORS[accentName] ??
             ACCENT_COLORS.blue;
 
+        const accent = hexToRgb(hex);
+
         this._accentName = accentName;
-        this._accentColor = hexToRgb(hex);
+        this._accentColor = accent;
+        this._accentGlowColor = mixColor(accent, [1, 1, 1], 0.16);
+        this._accentCoreColor = mixColor(accent, [1, 1, 1], 0.70);
+        this._tailColor = mixColor(accent, [0.006, 0.008, 0.014], 0.88);
 
         console.log(
             `[${this.uuid}] accent updated ` +
@@ -323,9 +380,6 @@ export default class RaySlashExtension extends Extension {
     }
 
     _isEmptyDesktopAt(x, y) {
-        if (!this._backgroundGroup)
-            return false;
-
         if (Main.overview.visible)
             return false;
 
@@ -371,8 +425,17 @@ export default class RaySlashExtension extends Extension {
         ) {
             const [x, y] = event.get_coords();
 
-            if (!this._isEmptyDesktopAt(x, y)) {
-                this._finishStroke('desktop boundary');
+            /*
+             * Once a stroke starts on empty desktop, keep following it until
+             * release. The drawing actor is below windows and Shell chrome,
+             * so those objects naturally hide the portion passing beneath
+             * them while the ribbon can reappear on exposed desktop.
+             */
+            if (
+                Main.overview.visible ||
+                (Main.sessionMode?.isLocked ?? false)
+            ) {
+                this._finishStroke('shell mode changed');
                 return false;
             }
 
@@ -386,16 +449,11 @@ export default class RaySlashExtension extends Extension {
             if (this._dragging) {
                 const [x, y] = event.get_coords();
 
-                if (this._isEmptyDesktopAt(x, y))
-                    this._appendPoint(x, y);
-
+                this._appendPoint(x, y);
                 this._finishStroke('button release');
             }
         }
 
-        /*
-         * Returning false leaves the original event unconsumed.
-         */
         return false;
     }
 
@@ -409,7 +467,6 @@ export default class RaySlashExtension extends Extension {
                 width: MIN_BLADE_WIDTH,
                 time: now,
             }],
-            endedAt: null,
         };
 
         this._strokes.push(stroke);
@@ -443,11 +500,6 @@ export default class RaySlashExtension extends Extension {
             return;
         }
 
-        stroke.endedAt = monotonicMilliseconds();
-
-        /*
-         * A click without enough movement has no visible blade, so discard it.
-         */
         if (stroke.points.length < 2) {
             const index = this._strokes.indexOf(stroke);
 
@@ -476,7 +528,6 @@ export default class RaySlashExtension extends Extension {
 
         const points = stroke.points;
         const previous = points[points.length - 1];
-
         const now = monotonicMilliseconds();
 
         const dx = x - previous.x;
@@ -496,10 +547,6 @@ export default class RaySlashExtension extends Extension {
             MAX_BLADE_WIDTH
         );
 
-        /*
-         * Smooth width separately from position so small timing variations do
-         * not make the blade pulse between thin and thick.
-         */
         const width = lerp(
             previous.width,
             targetWidth,
@@ -554,10 +601,6 @@ export default class RaySlashExtension extends Extension {
         const cutoff = now - TAIL_LIFETIME_MS;
 
         for (const stroke of this._strokes) {
-            /*
-             * Retain one point just before the cutoff. It is used to
-             * interpolate the exact tapered beginning of the visible ribbon.
-             */
             while (
                 stroke.points.length > 2 &&
                 stroke.points[1].time < cutoff
@@ -580,59 +623,6 @@ export default class RaySlashExtension extends Extension {
         });
     }
 
-    _getVisiblePoints(stroke, now, lifetime) {
-        const points = stroke.points;
-
-        if (points.length < 2)
-            return [];
-
-        const cutoff = now - lifetime;
-
-        let firstVisibleIndex = points.findIndex(
-            point => point.time >= cutoff
-        );
-
-        if (firstVisibleIndex < 0)
-            return [];
-
-        const visible = [];
-
-        /*
-         * Insert a point exactly at the age boundary. This makes the tail
-         * retreat continuously instead of dropping an entire sampled segment
-         * at once.
-         */
-        if (firstVisibleIndex > 0) {
-            const previous = points[firstVisibleIndex - 1];
-            const current = points[firstVisibleIndex];
-
-            const duration =
-                Math.max(1, current.time - previous.time);
-
-            const progress = clamp(
-                (cutoff - previous.time) / duration,
-                0,
-                1
-            );
-
-            visible.push(
-                interpolatePoint(previous, current, progress)
-            );
-        }
-
-        for (
-            let index = firstVisibleIndex;
-            index < points.length;
-            index++
-        ) {
-            visible.push({
-                ...points[index],
-            });
-        }
-
-        return visible;
-    }
-
     _onRepaint(area) {
         const cr = area.get_context();
 
@@ -640,34 +630,67 @@ export default class RaySlashExtension extends Extension {
             cr.setOperator(Cairo.Operator.CLEAR);
             cr.paint();
             cr.setOperator(Cairo.Operator.OVER);
+            cr.setAntialias(Cairo.Antialias.BEST);
 
             const now = monotonicMilliseconds();
 
-            /*
-             * Draw every dark ribbon first so all accent ribbons remain above
-             * their respective afterimages.
-             */
             for (const stroke of this._strokes) {
-                this._drawStrokeLayer(
-                    cr,
-                    stroke,
-                    now,
-                    TAIL_LIFETIME_MS,
-                    TAIL_WIDTH_MULTIPLIER,
-                    [0.012, 0.014, 0.020],
-                    0.40
-                );
-            }
+                if (stroke.points.length < 2)
+                    continue;
 
-            for (const stroke of this._strokes) {
-                this._drawStrokeLayer(
+                const smoothed = smoothPoints(
+                    stroke.points,
+                    SMOOTHING_PASSES
+                );
+
+                this._drawDarkAfterimage(
                     cr,
-                    stroke,
+                    smoothed,
+                    now
+                );
+
+                this._drawHeadWeightedLayer(
+                    cr,
+                    smoothed,
                     now,
                     MAIN_LIFETIME_MS,
-                    1,
+                    1.46,
+                    this._accentGlowColor,
+                    0.30,
+                    5
+                );
+
+                this._drawHeadWeightedLayer(
+                    cr,
+                    smoothed,
+                    now,
+                    MAIN_LIFETIME_MS,
+                    1.00,
                     this._accentColor,
-                    0.96
+                    0.82,
+                    6
+                );
+
+                this._drawHeadWeightedLayer(
+                    cr,
+                    smoothed,
+                    now,
+                    MAIN_LIFETIME_MS * 0.82,
+                    0.36,
+                    this._accentCoreColor,
+                    0.74,
+                    5
+                );
+
+                this._drawHeadWeightedLayer(
+                    cr,
+                    smoothed,
+                    now,
+                    MAIN_LIFETIME_MS * 0.58,
+                    0.12,
+                    [1, 1, 1],
+                    0.34,
+                    4
                 );
             }
         } finally {
@@ -675,59 +698,68 @@ export default class RaySlashExtension extends Extension {
         }
     }
 
-    _drawStrokeLayer(
+    _drawDarkAfterimage(cr, points, now) {
+        for (const window of DARK_TAIL_WINDOWS) {
+            const visible = pointsInTimeWindow(
+                points,
+                now - window.maxAge,
+                now - window.minAge
+            );
+
+            if (visible.length < 2)
+                continue;
+
+            this._drawRibbon(
+                cr,
+                visible,
+                window.width,
+                this._tailColor,
+                window.alpha
+            );
+        }
+    }
+
+    _drawHeadWeightedLayer(
         cr,
-        stroke,
+        points,
         now,
         lifetime,
         widthMultiplier,
         color,
-        baseAlpha
+        totalAlpha,
+        steps
     ) {
-        const visiblePoints = this._getVisiblePoints(
-            stroke,
-            now,
-            lifetime
-        );
-
-        if (visiblePoints.length < 2)
-            return;
-
-        const smoothed = smoothPoints(
-            visiblePoints,
-            SMOOTHING_PASSES
-        );
-
-        if (smoothed.length < 2)
-            return;
-
-        let alpha = baseAlpha;
-
         /*
-         * While drawing, the ribbon remains fully visible. Once released, the
-         * whole layer also fades while its aged beginning retreats.
+         * Draw nested versions of the same connected ribbon. The longest is
+         * faint and reaches furthest into the old tail; progressively shorter
+         * ribbons overlap toward the cursor, producing a smooth longitudinal
+         * fade without turning the stroke back into separate diamonds.
          */
-        if (stroke.endedAt !== null) {
-            const elapsedSinceRelease =
-                now - stroke.endedAt;
+        for (let step = steps; step >= 1; step--) {
+            const fraction = step / steps;
+            const windowLifetime =
+                lifetime * Math.pow(fraction, 1.35);
 
-            alpha *= clamp(
-                1 - elapsedSinceRelease / lifetime,
-                0,
-                1
+            const visible = pointsInTimeWindow(
+                points,
+                now - windowLifetime,
+                now + 1
+            );
+
+            if (visible.length < 2)
+                continue;
+
+            const alpha =
+                totalAlpha / steps;
+
+            this._drawRibbon(
+                cr,
+                visible,
+                widthMultiplier,
+                color,
+                alpha
             );
         }
-
-        if (alpha <= 0)
-            return;
-
-        this._drawRibbon(
-            cr,
-            smoothed,
-            widthMultiplier,
-            color,
-            alpha
-        );
     }
 
     _drawRibbon(
@@ -751,17 +783,17 @@ export default class RaySlashExtension extends Extension {
 
         const totalLength = distances[count - 1];
 
-        if (totalLength < 1)
+        if (totalLength < 1 || alpha <= 0)
             return;
 
         const headTaperLength = Math.min(
             HEAD_TAPER_LENGTH,
-            totalLength * 0.46
+            totalLength * 0.48
         );
 
         const tailTaperLength = Math.min(
             TAIL_TAPER_LENGTH,
-            totalLength * 0.46
+            totalLength * 0.48
         );
 
         const leftEdge = [];
@@ -797,10 +829,6 @@ export default class RaySlashExtension extends Extension {
             const distanceFromHead =
                 totalLength - distances[index];
 
-            /*
-             * These two factors produce pointed ends. The curved center of
-             * the slash retains the width calculated from pointer speed.
-             */
             const tailTaper = smoothStep(
                 distanceFromTail /
                     Math.max(1, tailTaperLength)
@@ -811,8 +839,10 @@ export default class RaySlashExtension extends Extension {
                     Math.max(1, headTaperLength)
             );
 
-            const taper =
-                Math.min(tailTaper, headTaper);
+            const taper = Math.min(
+                tailTaper,
+                headTaper
+            );
 
             const halfWidth =
                 points[index].width *
@@ -835,13 +865,6 @@ export default class RaySlashExtension extends Extension {
             });
         }
 
-        /*
-         * One Cairo path forms the entire blade:
-         *
-         * tail -> left edge -> pointed head -> reversed right edge -> tail
-         *
-         * There are no individual diamonds or segment fills.
-         */
         cr.newPath();
         cr.moveTo(leftEdge[0].x, leftEdge[0].y);
 
