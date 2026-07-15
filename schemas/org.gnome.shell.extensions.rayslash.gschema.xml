@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<schemalist>
+  <schema id="org.gnome.shell.extensions.rayslash" path="/org/gnome/shell/extensions/rayslash/">
+    <key name="enabled" type="b">
+      <default>true</default>
+      <summary>Enable drawing</summary>
+      <description>Whether RaySlash responds to desktop drags.</description>
+    </key>
+
+    <key name="color-mode" type="s">
+      <default>'accent'</default>
+      <summary>Ribbon color</summary>
+      <description>The system accent color or a fixed GNOME palette color.</description>
+    </key>
+
+    <key name="size-preset" type="s">
+      <default>'thin'</default>
+      <summary>Thickness preset</summary>
+      <description>The base and maximum width of the ribbon.</description>
+    </key>
+
+    <key name="style" type="s">
+      <default>'fruit'</default>
+      <summary>Visual style</summary>
+      <description>The layered rendering style used for the ribbon.</description>
+    </key>
+
+    <key name="timing-preset" type="s">
+      <default>'balanced'</default>
+      <summary>Fade timing</summary>
+      <description>How quickly the completed ribbon fades away.</description>
+    </key>
+
+    <key name="speed-response" type="s">
+      <default>'responsive'</default>
+      <summary>Speed response</summary>
+      <description>How strongly pointer speed changes ribbon width.</description>
+    </key>
+  </schema>
+</schemalist>

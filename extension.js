@@ -7,23 +7,14 @@ import St from 'gi://St';
 
 import {Extension} from 'resource:///org/gnome/shell/extensions/extension.js';
 import * as Main from 'resource:///org/gnome/shell/ui/main.js';
+import * as PanelMenu from 'resource:///org/gnome/shell/ui/panelMenu.js';
+import * as PopupMenu from 'resource:///org/gnome/shell/ui/popupMenu.js';
 
 const FRAME_INTERVAL_MS = 16;
-const MAIN_LIFETIME_MS = 270;
-const TAIL_LIFETIME_MS = 760;
-
-const MIN_POINT_DISTANCE = 3;
-const MAX_POINTS_PER_STROKE = 112;
-const MAX_STROKES = 6;
+const MIN_POINT_DISTANCE = 2.5;
+const MAX_POINTS_PER_STROKE = 240;
+const MAX_STROKES = 8;
 const SMOOTHING_PASSES = 2;
-
-const MIN_BLADE_WIDTH = 8;
-const MAX_BLADE_WIDTH = 30;
-const WIDTH_SPEED_MULTIPLIER = 12;
-const WIDTH_SMOOTHING = 0.32;
-
-const HEAD_TAPER_LENGTH = 58;
-const TAIL_TAPER_LENGTH = 72;
 
 const ACCENT_COLORS = Object.freeze({
     blue: '#3584e4',
@@ -37,12 +28,88 @@ const ACCENT_COLORS = Object.freeze({
     slate: '#6f8396',
 });
 
-const DARK_TAIL_WINDOWS = Object.freeze([
-    {minAge: 35, maxAge: 760, width: 1.70, alpha: 0.070},
-    {minAge: 65, maxAge: 600, width: 1.58, alpha: 0.080},
-    {minAge: 100, maxAge: 470, width: 1.48, alpha: 0.090},
-    {minAge: 145, maxAge: 350, width: 1.38, alpha: 0.105},
+const COLOR_CHOICES = Object.freeze([
+    {value: 'accent', label: 'System accent'},
+    {value: 'blue', label: 'Blue'},
+    {value: 'teal', label: 'Teal'},
+    {value: 'green', label: 'Green'},
+    {value: 'yellow', label: 'Yellow'},
+    {value: 'orange', label: 'Orange'},
+    {value: 'red', label: 'Red'},
+    {value: 'pink', label: 'Pink'},
+    {value: 'purple', label: 'Purple'},
+    {value: 'slate', label: 'Slate'},
 ]);
+
+const SIZE_CHOICES = Object.freeze([
+    {value: 'thin', label: 'Thin'},
+    {value: 'medium', label: 'Medium'},
+    {value: 'bold', label: 'Bold'},
+]);
+
+const STYLE_CHOICES = Object.freeze([
+    {value: 'fruit', label: 'Fruit blade'},
+    {value: 'clean', label: 'Clean'},
+    {value: 'neon', label: 'Neon'},
+    {value: 'shadow', label: 'Shadow'},
+]);
+
+const TIMING_CHOICES = Object.freeze([
+    {value: 'quick', label: 'Quick'},
+    {value: 'balanced', label: 'Balanced'},
+    {value: 'lingering', label: 'Lingering'},
+]);
+
+const SPEED_CHOICES = Object.freeze([
+    {value: 'steady', label: 'Steady width'},
+    {value: 'responsive', label: 'Responsive'},
+    {value: 'dynamic', label: 'Dynamic'},
+]);
+
+const SIZE_PRESETS = Object.freeze({
+    thin: {
+        minWidth: 3.5,
+        maxWidth: 11.5,
+        speedWidth: 5.2,
+        headTaper: 42,
+        tailTaper: 58,
+    },
+    medium: {
+        minWidth: 5.5,
+        maxWidth: 17.5,
+        speedWidth: 7.5,
+        headTaper: 50,
+        tailTaper: 68,
+    },
+    bold: {
+        minWidth: 8,
+        maxWidth: 25,
+        speedWidth: 10,
+        headTaper: 58,
+        tailTaper: 78,
+    },
+});
+
+const TIMING_PRESETS = Object.freeze({
+    quick: {
+        bodyLifetime: 170,
+        shadowLifetime: 300,
+    },
+    balanced: {
+        bodyLifetime: 260,
+        shadowLifetime: 470,
+    },
+    lingering: {
+        bodyLifetime: 390,
+        shadowLifetime: 720,
+    },
+});
+
+const SPEED_PRESETS = Object.freeze({
+    steady: 0,
+    responsive: 1,
+    dynamic: 1.75,
+});
 
 function clamp(value, minimum, maximum) {
     return Math.min(maximum, Math.max(minimum, value));
@@ -56,6 +123,12 @@ function smoothStep(progress) {
     const value = clamp(progress, 0, 1);
 
     return value * value * (3 - 2 * value);
+}
+
+function easeOutCubic(progress) {
+    const value = clamp(progress, 0, 1);
+
+    return 1 - Math.pow(1 - value, 3);
 }
 
 function monotonicMilliseconds() {
@@ -144,58 +217,70 @@ function smoothPoints(points, passes) {
     return result;
 }
 
-function pointsInTimeWindow(points, startTime, endTime) {
-    if (points.length < 2 || endTime <= startTime)
-        return [];
+function pointAtDistance(points, distances, targetDistance) {
+    if (targetDistance <= 0)
+        return {...points[0]};
 
-    const firstTime = points[0].time;
-    const lastTime = points[points.length - 1].time;
+    const totalLength = distances[distances.length - 1];
 
-    if (lastTime < startTime || firstTime > endTime)
-        return [];
+    if (targetDistance >= totalLength)
+        return {...points[points.length - 1]};
 
-    const result = [];
-
-    for (let index = 0; index < points.length - 1; index++) {
-        const first = points[index];
-        const second = points[index + 1];
-
-        if (second.time < startTime)
+    for (let index = 1; index < distances.length; index++) {
+        if (distances[index] < targetDistance)
             continue;
 
-        if (first.time > endTime)
-            break;
+        const previousDistance = distances[index - 1];
+        const segmentLength = Math.max(
+            0.001,
+            distances[index] - previousDistance
+        );
 
-        if (result.length === 0) {
-            if (startTime > first.time && startTime < second.time) {
-                const duration = Math.max(1, second.time - first.time);
+        const progress =
+            (targetDistance - previousDistance) /
+            segmentLength;
 
-                result.push(interpolatePoint(
-                    first,
-                    second,
-                    (startTime - first.time) / duration
-                ));
-            } else if (first.time >= startTime) {
-                result.push({...first});
-            }
-        }
+        return interpolatePoint(
+            points[index - 1],
+            points[index],
+            progress
+        );
+    }
 
-        if (second.time <= endTime) {
-            result.push({...second});
-            continue;
-        }
+    return {...points[points.length - 1]};
+}
 
-        if (endTime > first.time && endTime < second.time) {
-            const duration = Math.max(1, second.time - first.time);
+function pointsFromLengthFraction(points, startFraction) {
+    if (points.length < 2)
+        return [];
 
-            result.push(interpolatePoint(
-                first,
-                second,
-                (endTime - first.time) / duration
-            ));
-        }
+    const distances = new Array(points.length).fill(0);
 
-        break;
+    for (let index = 1; index < points.length; index++) {
+        distances[index] =
+            distances[index - 1] +
+            Math.hypot(
+                points[index].x - points[index - 1].x,
+                points[index].y - points[index - 1].y
+            );
+    }
+
+    const totalLength = distances[distances.length - 1];
+
+    if (totalLength < 1)
+        return points.map(point => ({...point}));
+
+    const startDistance =
+        totalLength *
+        clamp(startFraction, 0, 0.99);
+
+    const result = [
+        pointAtDistance(points, distances, startDistance),
+    ];
+
+    for (let index = 0; index < points.length; index++) {
+        if (distances[index] > startDistance)
+            result.push({...points[index]});
     }
 
     return result;
@@ -211,32 +296,53 @@ export default class RaySlashExtension extends Extension {
         this._capturedEventId = 0;
         this._repaintId = 0;
         this._accentChangedId = 0;
+        this._settingsChangedId = 0;
         this._monitorsChangedId = 0;
+
+        this._choiceItems = new Map();
+        this._choiceSubmenus = new Map();
 
         this._backgroundGroup =
             Main.layoutManager?._backgroundGroup ?? null;
 
-        this._windowGroup = global.window_group ?? null;
+        this._windowGroup =
+            global.window_group ?? null;
 
         if (!this._backgroundGroup || !this._windowGroup) {
             throw new Error(
-                'RaySlash could not find the GNOME Shell background/window groups'
+                'RaySlash could not find the GNOME Shell ' +
+                'background/window groups'
             );
         }
+
+        this._settings = this.getSettings();
 
         this._interfaceSettings = new Gio.Settings({
             schema_id: 'org.gnome.desktop.interface',
         });
 
-        this._updateAccentColors();
+        this._reloadConfiguration();
 
-        this._accentChangedId = this._interfaceSettings.connect(
-            'changed::accent-color',
+        this._settingsChangedId = this._settings.connect(
+            'changed',
             () => {
-                this._updateAccentColors();
+                this._reloadConfiguration();
+                this._syncMenu();
                 this._drawingArea?.queue_repaint();
             }
         );
+
+        this._accentChangedId =
+            this._interfaceSettings.connect(
+                'changed::accent-color',
+                () => {
+                    if (this._colorMode !== 'accent')
+                        return;
+
+                    this._updateColors();
+                    this._drawingArea?.queue_repaint();
+                }
+            );
 
         this._drawingArea = new St.DrawingArea({
             name: 'rayslashDrawingArea',
@@ -249,12 +355,8 @@ export default class RaySlashExtension extends Extension {
             area => this._onRepaint(area)
         );
 
-        /*
-         * Put RaySlash immediately above the desktop backgrounds, inside
-         * Mutter's window group. Normal windows remain above this actor, so
-         * the blade is visible on wallpaper but is naturally occluded by apps.
-         */
         this._windowGroup.add_child(this._drawingArea);
+
         this._windowGroup.set_child_above_sibling(
             this._drawingArea,
             this._backgroundGroup
@@ -262,52 +364,97 @@ export default class RaySlashExtension extends Extension {
 
         this._resizeDrawingArea();
 
-        this._monitorsChangedId = Main.layoutManager.connect(
-            'monitors-changed',
-            () => this._resizeDrawingArea()
-        );
+        this._monitorsChangedId =
+            Main.layoutManager.connect(
+                'monitors-changed',
+                () => this._resizeDrawingArea()
+            );
 
         this._capturedEventId = global.stage.connect(
             'captured-event',
-            (_stage, event) => this._onCapturedEvent(event)
+            (_stage, event) =>
+                this._onCapturedEvent(event)
         );
 
+        this._createIndicator();
+
         console.log(
-            `[${this.uuid}] layered ribbon enabled ` +
-            `accent=${this._accentName} ` +
+            `[${this.uuid}] configurable ribbon enabled ` +
+            `color=${this._colorMode} ` +
+            `size=${this._sizeName} ` +
+            `style=${this._styleName} ` +
+            `timing=${this._timingName} ` +
             'stack=above-background-below-windows'
         );
 
         Main.notify(
             this.metadata.name,
-            'Layered ribbon enabled. Windows now occlude the blade.'
+            'Configurable ribbon enabled. ' +
+            'Use the top-bar menu to tune it.'
         );
     }
 
     disable() {
         if (this._capturedEventId) {
-            global.stage.disconnect(this._capturedEventId);
+            global.stage.disconnect(
+                this._capturedEventId
+            );
+
             this._capturedEventId = 0;
         }
 
         if (this._monitorsChangedId) {
-            Main.layoutManager.disconnect(this._monitorsChangedId);
+            Main.layoutManager.disconnect(
+                this._monitorsChangedId
+            );
+
             this._monitorsChangedId = 0;
         }
 
-        if (this._accentChangedId && this._interfaceSettings) {
-            this._interfaceSettings.disconnect(this._accentChangedId);
+        if (
+            this._settingsChangedId &&
+            this._settings
+        ) {
+            this._settings.disconnect(
+                this._settingsChangedId
+            );
+
+            this._settingsChangedId = 0;
+        }
+
+        if (
+            this._accentChangedId &&
+            this._interfaceSettings
+        ) {
+            this._interfaceSettings.disconnect(
+                this._accentChangedId
+            );
+
             this._accentChangedId = 0;
         }
 
         if (this._animationSourceId) {
-            GLib.Source.remove(this._animationSourceId);
+            GLib.Source.remove(
+                this._animationSourceId
+            );
+
             this._animationSourceId = 0;
         }
 
+        this._indicator?.destroy();
+        this._indicator = null;
+        this._indicatorIcon = null;
+        this._enabledMenuItem = null;
+
+        this._choiceItems.clear();
+        this._choiceSubmenus.clear();
+
         if (this._drawingArea) {
             if (this._repaintId) {
-                this._drawingArea.disconnect(this._repaintId);
+                this._drawingArea.disconnect(
+                    this._repaintId
+                );
+
                 this._repaintId = 0;
             }
 
@@ -321,65 +468,335 @@ export default class RaySlashExtension extends Extension {
 
         this._backgroundGroup = null;
         this._windowGroup = null;
+        this._settings = null;
         this._interfaceSettings = null;
-        this._accentColor = null;
-        this._accentGlowColor = null;
-        this._accentCoreColor = null;
-        this._tailColor = null;
-        this._accentName = null;
 
-        console.log(`[${this.uuid}] layered ribbon disabled`);
+        console.log(
+            `[${this.uuid}] configurable ribbon disabled`
+        );
     }
 
-    _updateAccentColors() {
-        let accentName = 'blue';
+    _reloadConfiguration() {
+        this._featureEnabled =
+            this._settings.get_boolean('enabled');
 
-        try {
-            accentName =
-                this._interfaceSettings.get_string('accent-color');
-        } catch (error) {
-            console.error(
-                `[${this.uuid}] could not read accent color: ` +
-                `${error.message}`
-            );
+        this._colorMode =
+            this._settings.get_string('color-mode');
+
+        this._sizeName =
+            this._settings.get_string('size-preset');
+
+        this._styleName =
+            this._settings.get_string('style');
+
+        this._timingName =
+            this._settings.get_string('timing-preset');
+
+        this._speedName =
+            this._settings.get_string('speed-response');
+
+        this._size =
+            SIZE_PRESETS[this._sizeName] ??
+            SIZE_PRESETS.thin;
+
+        this._timing =
+            TIMING_PRESETS[this._timingName] ??
+            TIMING_PRESETS.balanced;
+
+        this._speedResponse =
+            SPEED_PRESETS[this._speedName] ??
+            SPEED_PRESETS.responsive;
+
+        this._updateColors();
+
+        if (!this._featureEnabled)
+            this._clearStrokes();
+    }
+
+    _updateColors() {
+        let colorName = this._colorMode;
+
+        if (colorName === 'accent') {
+            try {
+                colorName =
+                    this._interfaceSettings.get_string(
+                        'accent-color'
+                    );
+            } catch (error) {
+                console.error(
+                    `[${this.uuid}] could not read ` +
+                    `accent color: ${error.message}`
+                );
+
+                colorName = 'blue';
+            }
         }
 
         const hex =
-            ACCENT_COLORS[accentName] ??
+            ACCENT_COLORS[colorName] ??
             ACCENT_COLORS.blue;
 
         const accent = hexToRgb(hex);
 
-        this._accentName = accentName;
+        this._accentName = colorName;
         this._accentColor = accent;
-        this._accentGlowColor = mixColor(accent, [1, 1, 1], 0.16);
-        this._accentCoreColor = mixColor(accent, [1, 1, 1], 0.70);
-        this._tailColor = mixColor(accent, [0.006, 0.008, 0.014], 0.88);
 
-        console.log(
-            `[${this.uuid}] accent updated ` +
-            `name=${accentName} color=${hex}`
+        this._accentBrightColor = mixColor(
+            accent,
+            [1, 1, 1],
+            0.23
         );
+
+        this._accentCoreColor = mixColor(
+            accent,
+            [1, 1, 1],
+            0.72
+        );
+
+        this._tailColor = mixColor(
+            accent,
+            [0.008, 0.010, 0.018],
+            0.87
+        );
+    }
+
+    _createIndicator() {
+        this._indicator = new PanelMenu.Button(
+            0,
+            this.metadata.name,
+            false
+        );
+
+        this._indicatorIcon = new St.Icon({
+            icon_name: 'selection-mode-symbolic',
+            style_class: 'system-status-icon',
+        });
+
+        this._indicator.add_child(
+            this._indicatorIcon
+        );
+
+        Main.panel.addToStatusArea(
+            this.uuid,
+            this._indicator
+        );
+
+        this._enabledMenuItem =
+            new PopupMenu.PopupSwitchMenuItem(
+                'Drawing enabled',
+                this._featureEnabled
+            );
+
+        this._enabledMenuItem.connect(
+            'toggled',
+            (_item, state) => {
+                this._settings.set_boolean(
+                    'enabled',
+                    state
+                );
+            }
+        );
+
+        this._indicator.menu.addMenuItem(
+            this._enabledMenuItem
+        );
+
+        this._indicator.menu.addMenuItem(
+            new PopupMenu.PopupSeparatorMenuItem()
+        );
+
+        this._addChoiceSubmenu(
+            'Color',
+            'preferences-color-symbolic',
+            'color-mode',
+            COLOR_CHOICES
+        );
+
+        this._addChoiceSubmenu(
+            'Thickness',
+            'format-line-spacing-symbolic',
+            'size-preset',
+            SIZE_CHOICES
+        );
+
+        this._addChoiceSubmenu(
+            'Style',
+            'applications-graphics-symbolic',
+            'style',
+            STYLE_CHOICES
+        );
+
+        this._addChoiceSubmenu(
+            'Fade timing',
+            'preferences-system-time-symbolic',
+            'timing-preset',
+            TIMING_CHOICES
+        );
+
+        this._addChoiceSubmenu(
+            'Speed response',
+            'speedometer-symbolic',
+            'speed-response',
+            SPEED_CHOICES
+        );
+
+        this._indicator.menu.addMenuItem(
+            new PopupMenu.PopupSeparatorMenuItem()
+        );
+
+        this._indicator.menu.addAction(
+            'Clear trails',
+            () => this._clearStrokes(),
+            'edit-clear-all-symbolic'
+        );
+
+        this._indicator.menu.addAction(
+            'Reset presets',
+            () => {
+                for (const key of [
+                    'enabled',
+                    'color-mode',
+                    'size-preset',
+                    'style',
+                    'timing-preset',
+                    'speed-response',
+                ]) {
+                    this._settings.reset(key);
+                }
+            },
+            'edit-undo-symbolic'
+        );
+
+        this._syncMenu();
+    }
+
+    _addChoiceSubmenu(
+        title,
+        iconName,
+        settingKey,
+        choices
+    ) {
+        const submenu =
+            new PopupMenu.PopupSubMenuMenuItem(
+                title,
+                true
+            );
+
+        submenu.icon.icon_name = iconName;
+
+        this._choiceSubmenus.set(settingKey, {
+            submenu,
+            title,
+            choices,
+        });
+
+        const items = new Map();
+
+        for (const choice of choices) {
+            const item =
+                new PopupMenu.PopupMenuItem(
+                    choice.label
+                );
+
+            item.connect('activate', () => {
+                this._settings.set_string(
+                    settingKey,
+                    choice.value
+                );
+            });
+
+            submenu.menu.addMenuItem(item);
+            items.set(choice.value, item);
+        }
+
+        this._choiceItems.set(settingKey, items);
+
+        this._indicator.menu.addMenuItem(
+            submenu
+        );
+    }
+
+    _syncMenu() {
+        if (!this._indicator)
+            return;
+
+        if (
+            this._enabledMenuItem?.state !==
+            this._featureEnabled
+        ) {
+            this._enabledMenuItem?.setToggleState(
+                this._featureEnabled
+            );
+        }
+
+        this._indicatorIcon.opacity =
+            this._featureEnabled ? 255 : 110;
+
+        const currentValues = new Map([
+            ['color-mode', this._colorMode],
+            ['size-preset', this._sizeName],
+            ['style', this._styleName],
+            ['timing-preset', this._timingName],
+            ['speed-response', this._speedName],
+        ]);
+
+        for (
+            const [key, details]
+            of this._choiceSubmenus
+        ) {
+            const selectedValue =
+                currentValues.get(key);
+
+            const selectedChoice =
+                details.choices.find(
+                    choice =>
+                        choice.value ===
+                        selectedValue
+                );
+
+            details.submenu.label.text =
+                selectedChoice
+                    ? `${details.title}: ` +
+                      selectedChoice.label
+                    : details.title;
+
+            for (
+                const [value, item]
+                of this._choiceItems.get(key)
+            ) {
+                item.setOrnament(
+                    value === selectedValue
+                        ? PopupMenu.Ornament.DOT
+                        : PopupMenu.Ornament.NONE
+                );
+            }
+        }
+    }
+
+    _clearStrokes() {
+        this._strokes = [];
+        this._activeStroke = null;
+        this._dragging = false;
+
+        this._drawingArea?.queue_repaint();
     }
 
     _resizeDrawingArea() {
         if (!this._drawingArea)
             return;
 
-        const [width, height] = global.stage.get_size();
+        const [width, height] =
+            global.stage.get_size();
 
         this._drawingArea.set_position(0, 0);
         this._drawingArea.set_size(width, height);
         this._drawingArea.queue_repaint();
-
-        console.log(
-            `[${this.uuid}] drawing area resized ` +
-            `width=${Math.round(width)} ` +
-            `height=${Math.round(height)}`
-        );
     }
 
     _isEmptyDesktopAt(x, y) {
+        if (!this._featureEnabled)
+            return false;
+
         if (Main.overview.visible)
             return false;
 
@@ -389,27 +806,34 @@ export default class RaySlashExtension extends Extension {
         let actor = null;
 
         try {
-            actor = global.stage.get_actor_at_pos(
-                Clutter.PickMode.REACTIVE,
-                Math.floor(x),
-                Math.floor(y)
-            );
+            actor =
+                global.stage.get_actor_at_pos(
+                    Clutter.PickMode.REACTIVE,
+                    Math.floor(x),
+                    Math.floor(y)
+                );
         } catch (error) {
             console.error(
-                `[${this.uuid}] desktop actor pick failed: ` +
-                `${error.message}`
+                `[${this.uuid}] desktop actor ` +
+                `pick failed: ${error.message}`
             );
 
             return false;
         }
 
-        return actorIsInside(actor, this._backgroundGroup);
+        return actorIsInside(
+            actor,
+            this._backgroundGroup
+        );
     }
 
     _onCapturedEvent(event) {
         const eventType = event.type();
 
-        if (eventType === Clutter.EventType.BUTTON_PRESS) {
+        if (
+            eventType ===
+            Clutter.EventType.BUTTON_PRESS
+        ) {
             if (event.get_button() !== 1)
                 return false;
 
@@ -420,37 +844,40 @@ export default class RaySlashExtension extends Extension {
             else
                 this._cancelActiveStroke();
         } else if (
-            eventType === Clutter.EventType.MOTION &&
+            eventType ===
+                Clutter.EventType.MOTION &&
             this._dragging
         ) {
             const [x, y] = event.get_coords();
 
-            /*
-             * Once a stroke starts on empty desktop, keep following it until
-             * release. The drawing actor is below windows and Shell chrome,
-             * so those objects naturally hide the portion passing beneath
-             * them while the ribbon can reappear on exposed desktop.
-             */
             if (
                 Main.overview.visible ||
                 (Main.sessionMode?.isLocked ?? false)
             ) {
-                this._finishStroke('shell mode changed');
+                this._finishStroke(
+                    'shell mode changed'
+                );
+
                 return false;
             }
 
             this._appendPoint(x, y);
         } else if (
-            eventType === Clutter.EventType.BUTTON_RELEASE
+            eventType ===
+            Clutter.EventType.BUTTON_RELEASE
         ) {
             if (event.get_button() !== 1)
                 return false;
 
             if (this._dragging) {
-                const [x, y] = event.get_coords();
+                const [x, y] =
+                    event.get_coords();
 
                 this._appendPoint(x, y);
-                this._finishStroke('button release');
+
+                this._finishStroke(
+                    'button release'
+                );
             }
         }
 
@@ -464,27 +891,27 @@ export default class RaySlashExtension extends Extension {
             points: [{
                 x,
                 y,
-                width: MIN_BLADE_WIDTH,
+                width: this._size.minWidth,
                 time: now,
             }],
+            endedAt: null,
         };
 
         this._strokes.push(stroke);
 
-        if (this._strokes.length > MAX_STROKES) {
+        if (
+            this._strokes.length >
+            MAX_STROKES
+        ) {
             this._strokes.splice(
                 0,
-                this._strokes.length - MAX_STROKES
+                this._strokes.length -
+                    MAX_STROKES
             );
         }
 
         this._activeStroke = stroke;
         this._dragging = true;
-
-        console.log(
-            `[${this.uuid}] ribbon started ` +
-            `x=${Math.round(x)} y=${Math.round(y)}`
-        );
     }
 
     _cancelActiveStroke() {
@@ -501,11 +928,15 @@ export default class RaySlashExtension extends Extension {
         }
 
         if (stroke.points.length < 2) {
-            const index = this._strokes.indexOf(stroke);
+            const index =
+                this._strokes.indexOf(stroke);
 
             if (index >= 0)
                 this._strokes.splice(index, 1);
         } else {
+            stroke.endedAt =
+                monotonicMilliseconds();
+
             this._ensureAnimationSource();
         }
 
@@ -517,6 +948,7 @@ export default class RaySlashExtension extends Extension {
 
         this._activeStroke = null;
         this._dragging = false;
+
         this._drawingArea?.queue_repaint();
     }
 
@@ -527,7 +959,9 @@ export default class RaySlashExtension extends Extension {
             return;
 
         const points = stroke.points;
-        const previous = points[points.length - 1];
+        const previous =
+            points[points.length - 1];
+
         const now = monotonicMilliseconds();
 
         const dx = x - previous.x;
@@ -537,20 +971,30 @@ export default class RaySlashExtension extends Extension {
         if (distance < MIN_POINT_DISTANCE)
             return;
 
-        const elapsed = Math.max(1, now - previous.time);
+        const elapsed =
+            Math.max(
+                1,
+                now - previous.time
+            );
+
         const speed = distance / elapsed;
 
+        const speedContribution =
+            speed *
+            this._size.speedWidth *
+            this._speedResponse;
+
         const targetWidth = clamp(
-            MIN_BLADE_WIDTH +
-                speed * WIDTH_SPEED_MULTIPLIER,
-            MIN_BLADE_WIDTH,
-            MAX_BLADE_WIDTH
+            this._size.minWidth +
+                speedContribution,
+            this._size.minWidth,
+            this._size.maxWidth
         );
 
         const width = lerp(
             previous.width,
             targetWidth,
-            WIDTH_SMOOTHING
+            0.28
         );
 
         points.push({
@@ -560,79 +1004,127 @@ export default class RaySlashExtension extends Extension {
             time: now,
         });
 
-        if (points.length > MAX_POINTS_PER_STROKE) {
-            points.splice(
-                0,
-                points.length - MAX_POINTS_PER_STROKE
-            );
+        if (
+            points.length >
+            MAX_POINTS_PER_STROKE
+        ) {
+            this._decimateStroke(stroke);
         }
 
         this._drawingArea?.queue_repaint();
-        this._ensureAnimationSource();
+    }
+
+    _decimateStroke(stroke) {
+        const points = stroke.points;
+        const reduced = [points[0]];
+
+        for (
+            let index = 2;
+            index < points.length - 1;
+            index += 2
+        ) {
+            reduced.push(points[index]);
+        }
+
+        reduced.push(
+            points[points.length - 1]
+        );
+
+        stroke.points = reduced;
     }
 
     _ensureAnimationSource() {
         if (this._animationSourceId)
             return;
 
-        this._animationSourceId = GLib.timeout_add(
-            GLib.PRIORITY_DEFAULT,
-            FRAME_INTERVAL_MS,
-            () => {
-                const now = monotonicMilliseconds();
+        this._animationSourceId =
+            GLib.timeout_add(
+                GLib.PRIORITY_DEFAULT,
+                FRAME_INTERVAL_MS,
+                () => {
+                    const now =
+                        monotonicMilliseconds();
 
-                this._pruneStrokes(now);
-                this._drawingArea?.queue_repaint();
+                    this._pruneStrokes(now);
 
-                if (
-                    this._strokes.length === 0 &&
-                    !this._dragging
-                ) {
-                    this._animationSourceId = 0;
-                    return GLib.SOURCE_REMOVE;
+                    this._drawingArea
+                        ?.queue_repaint();
+
+                    if (
+                        this._strokes.every(
+                            stroke =>
+                                stroke.endedAt ===
+                                null
+                        ) ||
+                        this._strokes.length === 0
+                    ) {
+                        this._animationSourceId = 0;
+
+                        return GLib.SOURCE_REMOVE;
+                    }
+
+                    return GLib.SOURCE_CONTINUE;
                 }
-
-                return GLib.SOURCE_CONTINUE;
-            }
-        );
+            );
     }
 
     _pruneStrokes(now) {
-        const cutoff = now - TAIL_LIFETIME_MS;
+        const maximumLifetime = Math.max(
+            this._timing.bodyLifetime,
+            this._timing.shadowLifetime
+        );
 
-        for (const stroke of this._strokes) {
-            while (
-                stroke.points.length > 2 &&
-                stroke.points[1].time < cutoff
-            ) {
-                stroke.points.shift();
-            }
-        }
+        this._strokes =
+            this._strokes.filter(stroke => {
+                if (
+                    stroke === this._activeStroke ||
+                    stroke.endedAt === null
+                ) {
+                    return true;
+                }
 
-        this._strokes = this._strokes.filter(stroke => {
-            if (stroke === this._activeStroke)
-                return true;
+                return (
+                    now - stroke.endedAt <
+                    maximumLifetime
+                );
+            });
+    }
 
-            if (stroke.points.length === 0)
-                return false;
+    _fadeForStroke(stroke, now, lifetime) {
+        if (stroke.endedAt === null)
+            return 1;
 
-            const newest =
-                stroke.points[stroke.points.length - 1];
+        const elapsed =
+            now - stroke.endedAt;
 
-            return now - newest.time < TAIL_LIFETIME_MS;
-        });
+        if (elapsed >= lifetime)
+            return 0;
+
+        const progress = elapsed / lifetime;
+
+        return 1 - easeOutCubic(progress);
     }
 
     _onRepaint(area) {
         const cr = area.get_context();
 
         try {
-            cr.setOperator(Cairo.Operator.CLEAR);
-            cr.paint();
-            cr.setOperator(Cairo.Operator.OVER);
-            cr.setAntialias(Cairo.Antialias.BEST);
+            cr.setOperator(
+                Cairo.Operator.CLEAR
+            );
 
-            const now = monotonicMilliseconds();
+            cr.paint();
+
+            cr.setOperator(
+                Cairo.Operator.OVER
+            );
+
+            cr.setAntialias(
+                Cairo.Antialias.BEST
+            );
+
+            const now =
+                monotonicMilliseconds();
 
             for (const stroke of this._strokes) {
                 if (stroke.points.length < 2)
@@ -643,54 +1135,11 @@ export default class RaySlashExtension extends Extension {
                     SMOOTHING_PASSES
                 );
 
-                this._drawDarkAfterimage(
+                this._drawConfiguredStyle(
                     cr,
                     smoothed,
+                    stroke,
                     now
-                );
-
-                this._drawHeadWeightedLayer(
-                    cr,
-                    smoothed,
-                    now,
-                    MAIN_LIFETIME_MS,
-                    1.46,
-                    this._accentGlowColor,
-                    0.30,
-                    5
-                );
-
-                this._drawHeadWeightedLayer(
-                    cr,
-                    smoothed,
-                    now,
-                    MAIN_LIFETIME_MS,
-                    1.00,
-                    this._accentColor,
-                    0.82,
-                    6
-                );
-
-                this._drawHeadWeightedLayer(
-                    cr,
-                    smoothed,
-                    now,
-                    MAIN_LIFETIME_MS * 0.82,
-                    0.36,
-                    this._accentCoreColor,
-                    0.74,
-                    5
-                );
-
-                this._drawHeadWeightedLayer(
-                    cr,
-                    smoothed,
-                    now,
-                    MAIN_LIFETIME_MS * 0.58,
-                    0.12,
-                    [1, 1, 1],
-                    0.34,
-                    4
                 );
             }
         } finally {
@@ -698,68 +1147,219 @@ export default class RaySlashExtension extends Extension {
         }
     }
 
-    _drawDarkAfterimage(cr, points, now) {
-        for (const window of DARK_TAIL_WINDOWS) {
-            const visible = pointsInTimeWindow(
-                points,
-                now - window.maxAge,
-                now - window.minAge
+    _drawConfiguredStyle(
+        cr,
+        points,
+        stroke,
+        now
+    ) {
+        const bodyFade =
+            this._fadeForStroke(
+                stroke,
+                now,
+                this._timing.bodyLifetime
             );
 
-            if (visible.length < 2)
-                continue;
+        const shadowFade =
+            this._fadeForStroke(
+                stroke,
+                now,
+                this._timing.shadowLifetime
+            );
 
-            this._drawRibbon(
+        switch (this._styleName) {
+        case 'clean':
+            this._drawCleanStyle(
                 cr,
-                visible,
-                window.width,
-                this._tailColor,
-                window.alpha
+                points,
+                bodyFade
             );
+
+            break;
+
+        case 'neon':
+            this._drawNeonStyle(
+                cr,
+                points,
+                bodyFade
+            );
+
+            break;
+
+        case 'shadow':
+            this._drawShadowStyle(
+                cr,
+                points,
+                bodyFade,
+                shadowFade
+            );
+
+            break;
+
+        case 'fruit':
+        default:
+            this._drawFruitStyle(
+                cr,
+                points,
+                bodyFade,
+                shadowFade
+            );
+
+            break;
         }
     }
 
-    _drawHeadWeightedLayer(
+    _drawFruitStyle(
         cr,
         points,
-        now,
-        lifetime,
-        widthMultiplier,
-        color,
-        totalAlpha,
-        steps
+        bodyFade,
+        shadowFade
     ) {
-        /*
-         * Draw nested versions of the same connected ribbon. The longest is
-         * faint and reaches furthest into the old tail; progressively shorter
-         * ribbons overlap toward the cursor, producing a smooth longitudinal
-         * fade without turning the stroke back into separate diamonds.
-         */
-        for (let step = steps; step >= 1; step--) {
-            const fraction = step / steps;
-            const windowLifetime =
-                lifetime * Math.pow(fraction, 1.35);
+        this._drawRibbon(
+            cr,
+            points,
+            1.30,
+            this._tailColor,
+            0.22 * shadowFade
+        );
 
-            const visible = pointsInTimeWindow(
+        this._drawRibbon(
+            cr,
+            points,
+            1.16,
+            this._accentBrightColor,
+            0.18 * bodyFade
+        );
+
+        this._drawRibbon(
+            cr,
+            points,
+            1,
+            this._accentColor,
+            0.82 * bodyFade
+        );
+
+        this._drawRibbon(
+            cr,
+            pointsFromLengthFraction(
                 points,
-                now - windowLifetime,
-                now + 1
-            );
+                0.28
+            ),
+            0.72,
+            this._accentBrightColor,
+            0.52 * bodyFade
+        );
 
-            if (visible.length < 2)
-                continue;
+        this._drawRibbon(
+            cr,
+            pointsFromLengthFraction(
+                points,
+                0.58
+            ),
+            0.19,
+            this._accentCoreColor,
+            0.76 * bodyFade
+        );
+    }
 
-            const alpha =
-                totalAlpha / steps;
+    _drawCleanStyle(
+        cr,
+        points,
+        bodyFade
+    ) {
+        this._drawRibbon(
+            cr,
+            points,
+            1,
+            this._accentColor,
+            0.88 * bodyFade
+        );
 
-            this._drawRibbon(
-                cr,
-                visible,
-                widthMultiplier,
-                color,
-                alpha
-            );
-        }
+        this._drawRibbon(
+            cr,
+            pointsFromLengthFraction(
+                points,
+                0.46
+            ),
+            0.18,
+            this._accentCoreColor,
+            0.48 * bodyFade
+        );
+    }
+
+    _drawNeonStyle(
+        cr,
+        points,
+        bodyFade
+    ) {
+        this._drawRibbon(
+            cr,
+            points,
+            1.70,
+            this._accentColor,
+            0.13 * bodyFade
+        );
+
+        this._drawRibbon(
+            cr,
+            points,
+            1.30,
+            this._accentBrightColor,
+            0.21 * bodyFade
+        );
+
+        this._drawRibbon(
+            cr,
+            points,
+            0.72,
+            this._accentColor,
+            0.88 * bodyFade
+        );
+
+        this._drawRibbon(
+            cr,
+            pointsFromLengthFraction(
+                points,
+                0.38
+            ),
+            0.16,
+            [1, 1, 1],
+            0.72 * bodyFade
+        );
+    }
+
+    _drawShadowStyle(
+        cr,
+        points,
+        bodyFade,
+        shadowFade
+    ) {
+        this._drawRibbon(
+            cr,
+            points,
+            1.55,
+            this._tailColor,
+            0.30 * shadowFade
+        );
+
+        this._drawRibbon(
+            cr,
+            points,
+            0.90,
+            this._accentColor,
+            0.80 * bodyFade
+        );
+
+        this._drawRibbon(
+            cr,
+            pointsFromLengthFraction(
+                points,
+                0.55
+            ),
+            0.13,
+            this._accentCoreColor,
+            0.38 * bodyFade
+        );
     }
 
     _drawRibbon(
@@ -769,30 +1369,46 @@ export default class RaySlashExtension extends Extension {
         color,
         alpha
     ) {
-        const count = points.length;
-        const distances = new Array(count).fill(0);
-
-        for (let index = 1; index < count; index++) {
-            const dx = points[index].x - points[index - 1].x;
-            const dy = points[index].y - points[index - 1].y;
-
-            distances[index] =
-                distances[index - 1] +
-                Math.hypot(dx, dy);
+        if (
+            points.length < 2 ||
+            alpha <= 0
+        ) {
+            return;
         }
 
-        const totalLength = distances[count - 1];
+        const count = points.length;
 
-        if (totalLength < 1 || alpha <= 0)
+        const distances =
+            new Array(count).fill(0);
+
+        for (
+            let index = 1;
+            index < count;
+            index++
+        ) {
+            distances[index] =
+                distances[index - 1] +
+                Math.hypot(
+                    points[index].x -
+                        points[index - 1].x,
+                    points[index].y -
+                        points[index - 1].y
+                );
+        }
+
+        const totalLength =
+            distances[count - 1];
+
+        if (totalLength < 1)
             return;
 
         const headTaperLength = Math.min(
-            HEAD_TAPER_LENGTH,
+            this._size.headTaper,
             totalLength * 0.48
         );
 
         const tailTaperLength = Math.min(
-            TAIL_TAPER_LENGTH,
+            this._size.tailTaper,
             totalLength * 0.48
         );
 
@@ -802,73 +1418,115 @@ export default class RaySlashExtension extends Extension {
         let previousNormalX = 0;
         let previousNormalY = 1;
 
-        for (let index = 0; index < count; index++) {
+        for (
+            let index = 0;
+            index < count;
+            index++
+        ) {
             const previous =
-                points[Math.max(0, index - 1)];
+                points[
+                    Math.max(0, index - 1)
+                ];
 
             const next =
-                points[Math.min(count - 1, index + 1)];
+                points[
+                    Math.min(
+                        count - 1,
+                        index + 1
+                    )
+                ];
 
-            const tangentX = next.x - previous.x;
-            const tangentY = next.y - previous.y;
+            const tangentX =
+                next.x - previous.x;
+
+            const tangentY =
+                next.y - previous.y;
+
             const tangentLength =
-                Math.hypot(tangentX, tangentY);
+                Math.hypot(
+                    tangentX,
+                    tangentY
+                );
 
             let normalX = previousNormalX;
             let normalY = previousNormalY;
 
             if (tangentLength > 0.001) {
-                normalX = -tangentY / tangentLength;
-                normalY = tangentX / tangentLength;
+                normalX =
+                    -tangentY /
+                    tangentLength;
+
+                normalY =
+                    tangentX /
+                    tangentLength;
 
                 previousNormalX = normalX;
                 previousNormalY = normalY;
             }
 
-            const distanceFromTail = distances[index];
+            const distanceFromTail =
+                distances[index];
+
             const distanceFromHead =
-                totalLength - distances[index];
+                totalLength -
+                distances[index];
 
             const tailTaper = smoothStep(
                 distanceFromTail /
-                    Math.max(1, tailTaperLength)
+                    Math.max(
+                        1,
+                        tailTaperLength
+                    )
             );
 
             const headTaper = smoothStep(
                 distanceFromHead /
-                    Math.max(1, headTaperLength)
-            );
-
-            const taper = Math.min(
-                tailTaper,
-                headTaper
+                    Math.max(
+                        1,
+                        headTaperLength
+                    )
             );
 
             const halfWidth =
                 points[index].width *
                 widthMultiplier *
-                taper /
+                Math.min(
+                    tailTaper,
+                    headTaper
+                ) /
                 2;
 
             leftEdge.push({
-                x: points[index].x +
+                x:
+                    points[index].x +
                     normalX * halfWidth,
-                y: points[index].y +
+                y:
+                    points[index].y +
                     normalY * halfWidth,
             });
 
             rightEdge.push({
-                x: points[index].x -
+                x:
+                    points[index].x -
                     normalX * halfWidth,
-                y: points[index].y -
+                y:
+                    points[index].y -
                     normalY * halfWidth,
             });
         }
 
         cr.newPath();
-        cr.moveTo(leftEdge[0].x, leftEdge[0].y);
 
-        for (let index = 1; index < leftEdge.length; index++) {
+        cr.moveTo(
+            leftEdge[0].x,
+            leftEdge[0].y
+        );
+
+        for (
+            let index = 1;
+            index < leftEdge.length;
+            index++
+        ) {
             cr.lineTo(
                 leftEdge[index].x,
                 leftEdge[index].y
@@ -876,7 +1534,8 @@ export default class RaySlashExtension extends Extension {
         }
 
         for (
-            let index = rightEdge.length - 1;
+            let index =
+                rightEdge.length - 1;
             index >= 0;
             index--
         ) {

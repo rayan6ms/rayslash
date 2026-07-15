@@ -1,3 +1,5 @@
 *.zip
 *.log
 .DS_Store
+
+schemas/gschemas.compiled

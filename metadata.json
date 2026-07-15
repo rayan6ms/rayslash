@@ -3,5 +3,6 @@
   "name": "RaySlash",
   "description": "Draw an ephemeral accent-colored slash trail while dragging across the empty desktop.",
   "shell-version": ["50"],
-  "version": 1
+  "settings-schema": "org.gnome.shell.extensions.rayslash",
+  "version": 2
 }
