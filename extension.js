@@ -9,20 +9,35 @@ import {Extension} from 'resource:///org/gnome/shell/extensions/extension.js';
 import * as Main from 'resource:///org/gnome/shell/ui/main.js';
 
 /*
- * Animation and geometry parameters.
- *
- * These are constants for now. Once the visual effect is working reliably,
- * they can become user-adjustable GSettings preferences.
+ * Animation timing.
  */
 const FRAME_INTERVAL_MS = 16;
+const MAIN_LIFETIME_MS = 240;
+const TAIL_LIFETIME_MS = 680;
 
-const MAIN_LIFETIME_MS = 220;
-const TAIL_LIFETIME_MS = 620;
+/*
+ * Pointer sampling and smoothing.
+ */
+const MIN_POINT_DISTANCE = 3;
+const MAX_POINTS_PER_STROKE = 128;
+const MAX_STROKES = 8;
+const SMOOTHING_PASSES = 2;
 
-const MIN_POINT_DISTANCE = 2.5;
-const MIN_BLADE_WIDTH = 7;
-const MAX_BLADE_WIDTH = 24;
-const MAX_SEGMENTS = 160;
+/*
+ * Ribbon geometry.
+ */
+const MIN_BLADE_WIDTH = 8;
+const MAX_BLADE_WIDTH = 30;
+const WIDTH_SPEED_MULTIPLIER = 12;
+const WIDTH_SMOOTHING = 0.35;
+
+const HEAD_TAPER_LENGTH = 62;
+const TAIL_TAPER_LENGTH = 52;
+
+/*
+ * The dark afterimage is slightly wider than the accent blade.
+ */
+const TAIL_WIDTH_MULTIPLIER = 1.4;
 
 /*
  * Official GNOME/libadwaita system accent colors.
@@ -43,13 +58,17 @@ function clamp(value, minimum, maximum) {
     return Math.min(maximum, Math.max(minimum, value));
 }
 
+function lerp(start, end, progress) {
+    return start + (end - start) * progress;
+}
+
+function smoothStep(progress) {
+    const value = clamp(progress, 0, 1);
+
+    return value * value * (3 - 2 * value);
+}
+
 function monotonicMilliseconds() {
-    /*
-     * GLib returns monotonic time in microseconds.
-     *
-     * Monotonic time is preferable to wall-clock time for animation because
-     * changing the system clock cannot make an animation jump backward.
-     */
     return GLib.get_monotonic_time() / 1000;
 }
 
@@ -90,11 +109,64 @@ function actorIsInside(actor, possibleAncestor) {
     return false;
 }
 
+/*
+ * Interpolate every property needed by the ribbon renderer.
+ */
+function interpolatePoint(first, second, progress) {
+    return {
+        x: lerp(first.x, second.x, progress),
+        y: lerp(first.y, second.y, progress),
+        width: lerp(first.width, second.width, progress),
+        time: lerp(first.time, second.time, progress),
+    };
+}
+
+/*
+ * One Chaikin pass replaces each line segment with two points located at
+ * one-quarter and three-quarters of the segment.
+ *
+ * Repeating this operation creates a smooth curve while preserving the first
+ * and last positions of the stroke.
+ */
+function smoothPointsOnce(points) {
+    if (points.length < 2)
+        return points.slice();
+
+    const result = [{
+        ...points[0],
+    }];
+
+    for (let index = 0; index < points.length - 1; index++) {
+        const first = points[index];
+        const second = points[index + 1];
+
+        result.push(interpolatePoint(first, second, 0.25));
+        result.push(interpolatePoint(first, second, 0.75));
+    }
+
+    result.push({
+        ...points[points.length - 1],
+    });
+
+    return result;
+}
+
+function smoothPoints(points, passes) {
+    let result = points.map(point => ({
+        ...point,
+    }));
+
+    for (let pass = 0; pass < passes; pass++)
+        result = smoothPointsOnce(result);
+
+    return result;
+}
+
 export default class RaySlashExtension extends Extension {
     enable() {
-        this._segments = [];
+        this._strokes = [];
+        this._activeStroke = null;
         this._dragging = false;
-        this._lastPoint = null;
 
         this._animationSourceId = 0;
         this._capturedEventId = 0;
@@ -102,10 +174,6 @@ export default class RaySlashExtension extends Extension {
         this._accentChangedId = 0;
         this._monitorsChangedId = 0;
 
-        /*
-         * This private Shell actor was confirmed by the diagnostic probe on
-         * GNOME Shell 50.3. It contains the reactive Meta_BackgroundActor.
-         */
         this._backgroundGroup =
             Main.layoutManager?._backgroundGroup ?? null;
 
@@ -124,10 +192,8 @@ export default class RaySlashExtension extends Extension {
         );
 
         /*
-         * The DrawingArea is transparent except where Cairo paints a slash.
-         *
-         * reactive=false is essential: the overlay must never receive or
-         * intercept pointer input.
+         * This surface is purely visual. Because it is non-reactive, it
+         * cannot become the pointer target or block normal desktop input.
          */
         this._drawingArea = new St.DrawingArea({
             name: 'rayslashDrawingArea',
@@ -140,17 +206,13 @@ export default class RaySlashExtension extends Extension {
             area => this._onRepaint(area)
         );
 
-        this._resizeDrawingArea();
-
-        /*
-         * Place the transparent visual surface at the top of the Shell scene.
-         * Because it is non-reactive, PickMode.REACTIVE ignores it.
-         */
         Main.uiGroup.add_child(this._drawingArea);
         Main.uiGroup.set_child_above_sibling(
             this._drawingArea,
             null
         );
+
+        this._resizeDrawingArea();
 
         this._monitorsChangedId = Main.layoutManager.connect(
             'monitors-changed',
@@ -163,14 +225,14 @@ export default class RaySlashExtension extends Extension {
         );
 
         console.log(
-            `[${this.uuid}] visual prototype enabled ` +
+            `[${this.uuid}] curved ribbon prototype enabled ` +
             `accent=${this._accentName} ` +
             `backgroundGroup=${this._backgroundGroup !== null}`
         );
 
         Main.notify(
             this.metadata.name,
-            'Visual prototype enabled. Drag across the empty desktop.'
+            'Curved ribbon prototype enabled. Drag across the desktop.'
         );
     }
 
@@ -205,16 +267,16 @@ export default class RaySlashExtension extends Extension {
             this._drawingArea = null;
         }
 
-        this._segments = [];
+        this._strokes = [];
+        this._activeStroke = null;
         this._dragging = false;
-        this._lastPoint = null;
 
         this._backgroundGroup = null;
         this._interfaceSettings = null;
         this._accentColor = null;
         this._accentName = null;
 
-        console.log(`[${this.uuid}] visual prototype disabled`);
+        console.log(`[${this.uuid}] curved ribbon prototype disabled`);
     }
 
     _updateAccentColor() {
@@ -255,7 +317,8 @@ export default class RaySlashExtension extends Extension {
 
         console.log(
             `[${this.uuid}] drawing area resized ` +
-            `width=${Math.round(width)} height=${Math.round(height)}`
+            `width=${Math.round(width)} ` +
+            `height=${Math.round(height)}`
         );
     }
 
@@ -272,13 +335,6 @@ export default class RaySlashExtension extends Extension {
         let actor = null;
 
         try {
-            /*
-             * REACTIVE is intentional.
-             *
-             * PickMode.ALL can return transparent visual layers such as the
-             * message tray. REACTIVE returns the actor that can actually
-             * interact with the pointer at this position.
-             */
             actor = global.stage.get_actor_at_pos(
                 Clutter.PickMode.REACTIVE,
                 Math.floor(x),
@@ -305,40 +361,18 @@ export default class RaySlashExtension extends Extension {
 
             const [x, y] = event.get_coords();
 
-            this._dragging = this._isEmptyDesktopAt(x, y);
-
-            if (this._dragging) {
-                this._lastPoint = {
-                    x,
-                    y,
-                    time: monotonicMilliseconds(),
-                };
-
-                console.log(
-                    `[${this.uuid}] slash started ` +
-                    `x=${Math.round(x)} y=${Math.round(y)}`
-                );
-            } else {
-                this._lastPoint = null;
-            }
+            if (this._isEmptyDesktopAt(x, y))
+                this._startStroke(x, y);
+            else
+                this._cancelActiveStroke();
         } else if (
             eventType === Clutter.EventType.MOTION &&
             this._dragging
         ) {
             const [x, y] = event.get_coords();
 
-            /*
-             * Stop collecting points when the pointer leaves the desktop.
-             * Existing segments continue fading normally.
-             */
             if (!this._isEmptyDesktopAt(x, y)) {
-                this._dragging = false;
-                this._lastPoint = null;
-
-                console.log(
-                    `[${this.uuid}] slash stopped at desktop boundary`
-                );
-
+                this._finishStroke('desktop boundary');
                 return false;
             }
 
@@ -352,77 +386,139 @@ export default class RaySlashExtension extends Extension {
             if (this._dragging) {
                 const [x, y] = event.get_coords();
 
-                /*
-                 * Include the release location when it remains on the desktop.
-                 */
                 if (this._isEmptyDesktopAt(x, y))
                     this._appendPoint(x, y);
 
-                console.log(
-                    `[${this.uuid}] slash ended ` +
-                    `segments=${this._segments.length}`
-                );
+                this._finishStroke('button release');
             }
-
-            this._dragging = false;
-            this._lastPoint = null;
         }
 
         /*
-         * RaySlash observes pointer events but never consumes them.
+         * Returning false leaves the original event unconsumed.
          */
         return false;
     }
 
-    _appendPoint(x, y) {
-        if (!this._lastPoint)
+    _startStroke(x, y) {
+        const now = monotonicMilliseconds();
+
+        const stroke = {
+            points: [{
+                x,
+                y,
+                width: MIN_BLADE_WIDTH,
+                time: now,
+            }],
+            endedAt: null,
+        };
+
+        this._strokes.push(stroke);
+
+        if (this._strokes.length > MAX_STROKES) {
+            this._strokes.splice(
+                0,
+                this._strokes.length - MAX_STROKES
+            );
+        }
+
+        this._activeStroke = stroke;
+        this._dragging = true;
+
+        console.log(
+            `[${this.uuid}] ribbon started ` +
+            `x=${Math.round(x)} y=${Math.round(y)}`
+        );
+    }
+
+    _cancelActiveStroke() {
+        this._activeStroke = null;
+        this._dragging = false;
+    }
+
+    _finishStroke(reason) {
+        const stroke = this._activeStroke;
+
+        if (!stroke) {
+            this._dragging = false;
             return;
+        }
+
+        stroke.endedAt = monotonicMilliseconds();
+
+        /*
+         * A click without enough movement has no visible blade, so discard it.
+         */
+        if (stroke.points.length < 2) {
+            const index = this._strokes.indexOf(stroke);
+
+            if (index >= 0)
+                this._strokes.splice(index, 1);
+        } else {
+            this._ensureAnimationSource();
+        }
+
+        console.log(
+            `[${this.uuid}] ribbon ended ` +
+            `reason=${JSON.stringify(reason)} ` +
+            `points=${stroke.points.length}`
+        );
+
+        this._activeStroke = null;
+        this._dragging = false;
+        this._drawingArea?.queue_repaint();
+    }
+
+    _appendPoint(x, y) {
+        const stroke = this._activeStroke;
+
+        if (!stroke)
+            return;
+
+        const points = stroke.points;
+        const previous = points[points.length - 1];
 
         const now = monotonicMilliseconds();
 
-        const dx = x - this._lastPoint.x;
-        const dy = y - this._lastPoint.y;
+        const dx = x - previous.x;
+        const dy = y - previous.y;
         const distance = Math.hypot(dx, dy);
 
         if (distance < MIN_POINT_DISTANCE)
             return;
 
-        const elapsed =
-            Math.max(1, now - this._lastPoint.time);
-
-        /*
-         * Pixels per millisecond. Faster pointer movement creates a wider,
-         * more dramatic blade while retaining a sensible minimum width.
-         */
+        const elapsed = Math.max(1, now - previous.time);
         const speed = distance / elapsed;
 
-        const width = clamp(
-            MIN_BLADE_WIDTH + speed * 12,
+        const targetWidth = clamp(
+            MIN_BLADE_WIDTH +
+                speed * WIDTH_SPEED_MULTIPLIER,
             MIN_BLADE_WIDTH,
             MAX_BLADE_WIDTH
         );
 
-        this._segments.push({
-            x1: this._lastPoint.x,
-            y1: this._lastPoint.y,
-            x2: x,
-            y2: y,
-            width,
-            created: now,
-        });
+        /*
+         * Smooth width separately from position so small timing variations do
+         * not make the blade pulse between thin and thick.
+         */
+        const width = lerp(
+            previous.width,
+            targetWidth,
+            WIDTH_SMOOTHING
+        );
 
-        if (this._segments.length > MAX_SEGMENTS) {
-            this._segments.splice(
-                0,
-                this._segments.length - MAX_SEGMENTS
-            );
-        }
-
-        this._lastPoint = {
+        points.push({
             x,
             y,
+            width,
             time: now,
-        };
+        });
+
+        if (points.length > MAX_POINTS_PER_STROKE) {
+            points.splice(
+                0,
+                points.length - MAX_POINTS_PER_STROKE
+            );
+        }
 
         this._drawingArea?.queue_repaint();
         this._ensureAnimationSource();
@@ -432,25 +528,19 @@ export default class RaySlashExtension extends Extension {
         if (this._animationSourceId)
             return;
 
-        /*
-         * This timer exists only while visible trail segments exist.
-         * It removes itself when the last dark-tail segment expires.
-         */
         this._animationSourceId = GLib.timeout_add(
             GLib.PRIORITY_DEFAULT,
             FRAME_INTERVAL_MS,
             () => {
                 const now = monotonicMilliseconds();
 
-                this._segments = this._segments.filter(
-                    segment =>
-                        now - segment.created <
-                        TAIL_LIFETIME_MS
-                );
-
+                this._pruneStrokes(now);
                 this._drawingArea?.queue_repaint();
 
-                if (this._segments.length === 0) {
+                if (
+                    this._strokes.length === 0 &&
+                    !this._dragging
+                ) {
                     this._animationSourceId = 0;
                     return GLib.SOURCE_REMOVE;
                 }
@@ -460,13 +550,93 @@ export default class RaySlashExtension extends Extension {
         );
     }
 
+    _pruneStrokes(now) {
+        const cutoff = now - TAIL_LIFETIME_MS;
+
+        for (const stroke of this._strokes) {
+            /*
+             * Retain one point just before the cutoff. It is used to
+             * interpolate the exact tapered beginning of the visible ribbon.
+             */
+            while (
+                stroke.points.length > 2 &&
+                stroke.points[1].time < cutoff
+            ) {
+                stroke.points.shift();
+            }
+        }
+
+        this._strokes = this._strokes.filter(stroke => {
+            if (stroke === this._activeStroke)
+                return true;
+
+            if (stroke.points.length === 0)
+                return false;
+
+            const newest =
+                stroke.points[stroke.points.length - 1];
+
+            return now - newest.time < TAIL_LIFETIME_MS;
+        });
+    }
+
+    _getVisiblePoints(stroke, now, lifetime) {
+        const points = stroke.points;
+
+        if (points.length < 2)
+            return [];
+
+        const cutoff = now - lifetime;
+
+        let firstVisibleIndex = points.findIndex(
+            point => point.time >= cutoff
+        );
+
+        if (firstVisibleIndex < 0)
+            return [];
+
+        const visible = [];
+
+        /*
+         * Insert a point exactly at the age boundary. This makes the tail
+         * retreat continuously instead of dropping an entire sampled segment
+         * at once.
+         */
+        if (firstVisibleIndex > 0) {
+            const previous = points[firstVisibleIndex - 1];
+            const current = points[firstVisibleIndex];
+
+            const duration =
+                Math.max(1, current.time - previous.time);
+
+            const progress = clamp(
+                (cutoff - previous.time) / duration,
+                0,
+                1
+            );
+
+            visible.push(
+                interpolatePoint(previous, current, progress)
+            );
+        }
+
+        for (
+            let index = firstVisibleIndex;
+            index < points.length;
+            index++
+        ) {
+            visible.push({
+                ...points[index],
+            });
+        }
+
+        return visible;
+    }
+
     _onRepaint(area) {
         const cr = area.get_context();
 
         try {
-            /*
-             * Clear the previous Cairo frame completely.
-             */
             cr.setOperator(Cairo.Operator.CLEAR);
             cr.paint();
             cr.setOperator(Cairo.Operator.OVER);
@@ -474,121 +644,224 @@ export default class RaySlashExtension extends Extension {
             const now = monotonicMilliseconds();
 
             /*
-             * Draw the dark afterimage first. It is wider and lasts longer.
+             * Draw every dark ribbon first so all accent ribbons remain above
+             * their respective afterimages.
              */
-            for (const segment of this._segments) {
-                const age = now - segment.created;
-
-                if (age < 0 || age >= TAIL_LIFETIME_MS)
-                    continue;
-
-                const tailProgress =
-                    age / TAIL_LIFETIME_MS;
-
-                const tailFade =
-                    1 - tailProgress;
-
-                /*
-                 * Initially the dark layer is subtle under the bright blade.
-                 * It becomes more visible as the bright blade ages.
-                 */
-                const revealProgress = clamp(
-                    age / MAIN_LIFETIME_MS,
-                    0,
-                    1
-                );
-
-                const tailAlpha =
-                    (0.10 + revealProgress * 0.32) *
-                    tailFade;
-
-                this._drawDiamond(
+            for (const stroke of this._strokes) {
+                this._drawStrokeLayer(
                     cr,
-                    segment,
-                    segment.width * 1.45,
-                    [0.015, 0.018, 0.025],
-                    tailAlpha
+                    stroke,
+                    now,
+                    TAIL_LIFETIME_MS,
+                    TAIL_WIDTH_MULTIPLIER,
+                    [0.012, 0.014, 0.020],
+                    0.40
                 );
             }
 
-            /*
-             * Draw the accent-colored blade over the dark afterimage.
-             */
-            for (const segment of this._segments) {
-                const age = now - segment.created;
-
-                if (age < 0 || age >= MAIN_LIFETIME_MS)
-                    continue;
-
-                const mainProgress =
-                    age / MAIN_LIFETIME_MS;
-
-                const mainFade =
-                    1 - mainProgress;
-
-                this._drawDiamond(
+            for (const stroke of this._strokes) {
+                this._drawStrokeLayer(
                     cr,
-                    segment,
-                    segment.width,
+                    stroke,
+                    now,
+                    MAIN_LIFETIME_MS,
+                    1,
                     this._accentColor,
-                    0.96 * mainFade
+                    0.96
                 );
             }
         } finally {
-            /*
-             * Explicitly release the native Cairo context wrapper.
-             */
             cr.$dispose();
         }
     }
 
-    _drawDiamond(cr, segment, width, color, alpha) {
-        const dx = segment.x2 - segment.x1;
-        const dy = segment.y2 - segment.y1;
-        const length = Math.hypot(dx, dy);
+    _drawStrokeLayer(
+        cr,
+        stroke,
+        now,
+        lifetime,
+        widthMultiplier,
+        color,
+        baseAlpha
+    ) {
+        const visiblePoints = this._getVisiblePoints(
+            stroke,
+            now,
+            lifetime
+        );
 
-        if (length < 0.001 || alpha <= 0)
+        if (visiblePoints.length < 2)
             return;
 
-        const midpointX =
-            (segment.x1 + segment.x2) / 2;
+        const smoothed = smoothPoints(
+            visiblePoints,
+            SMOOTHING_PASSES
+        );
 
-        const midpointY =
-            (segment.y1 + segment.y2) / 2;
+        if (smoothed.length < 2)
+            return;
 
-        const halfWidth = width / 2;
+        let alpha = baseAlpha;
 
         /*
-         * A perpendicular unit vector, scaled to half the blade width.
+         * While drawing, the ribbon remains fully visible. Once released, the
+         * whole layer also fades while its aged beginning retreats.
          */
-        const normalX =
-            (-dy / length) * halfWidth;
+        if (stroke.endedAt !== null) {
+            const elapsedSinceRelease =
+                now - stroke.endedAt;
 
-        const normalY =
-            (dx / length) * halfWidth;
+            alpha *= clamp(
+                1 - elapsedSinceRelease / lifetime,
+                0,
+                1
+            );
+        }
+
+        if (alpha <= 0)
+            return;
+
+        this._drawRibbon(
+            cr,
+            smoothed,
+            widthMultiplier,
+            color,
+            alpha
+        );
+    }
+
+    _drawRibbon(
+        cr,
+        points,
+        widthMultiplier,
+        color,
+        alpha
+    ) {
+        const count = points.length;
+        const distances = new Array(count).fill(0);
+
+        for (let index = 1; index < count; index++) {
+            const dx = points[index].x - points[index - 1].x;
+            const dy = points[index].y - points[index - 1].y;
+
+            distances[index] =
+                distances[index - 1] +
+                Math.hypot(dx, dy);
+        }
+
+        const totalLength = distances[count - 1];
+
+        if (totalLength < 1)
+            return;
+
+        const headTaperLength = Math.min(
+            HEAD_TAPER_LENGTH,
+            totalLength * 0.46
+        );
+
+        const tailTaperLength = Math.min(
+            TAIL_TAPER_LENGTH,
+            totalLength * 0.46
+        );
+
+        const leftEdge = [];
+        const rightEdge = [];
+
+        let previousNormalX = 0;
+        let previousNormalY = 1;
+
+        for (let index = 0; index < count; index++) {
+            const previous =
+                points[Math.max(0, index - 1)];
+
+            const next =
+                points[Math.min(count - 1, index + 1)];
+
+            const tangentX = next.x - previous.x;
+            const tangentY = next.y - previous.y;
+            const tangentLength =
+                Math.hypot(tangentX, tangentY);
+
+            let normalX = previousNormalX;
+            let normalY = previousNormalY;
+
+            if (tangentLength > 0.001) {
+                normalX = -tangentY / tangentLength;
+                normalY = tangentX / tangentLength;
+
+                previousNormalX = normalX;
+                previousNormalY = normalY;
+            }
+
+            const distanceFromTail = distances[index];
+            const distanceFromHead =
+                totalLength - distances[index];
+
+            /*
+             * These two factors produce pointed ends. The curved center of
+             * the slash retains the width calculated from pointer speed.
+             */
+            const tailTaper = smoothStep(
+                distanceFromTail /
+                    Math.max(1, tailTaperLength)
+            );
+
+            const headTaper = smoothStep(
+                distanceFromHead /
+                    Math.max(1, headTaperLength)
+            );
+
+            const taper =
+                Math.min(tailTaper, headTaper);
+
+            const halfWidth =
+                points[index].width *
+                widthMultiplier *
+                taper /
+                2;
+
+            leftEdge.push({
+                x: points[index].x +
+                    normalX * halfWidth,
+                y: points[index].y +
+                    normalY * halfWidth,
+            });
+
+            rightEdge.push({
+                x: points[index].x -
+                    normalX * halfWidth,
+                y: points[index].y -
+                    normalY * halfWidth,
+            });
+        }
 
         /*
-         * Four points form a stretched rhombus:
+         * One Cairo path forms the entire blade:
          *
-         *     midpoint + normal
-         *            /\
-         *     start <    > end
-         *            \/
-         *     midpoint - normal
+         * tail -> left edge -> pointed head -> reversed right edge -> tail
+         *
+         * There are no individual diamonds or segment fills.
          */
-        cr.moveTo(segment.x1, segment.y1);
+        cr.newPath();
+        cr.moveTo(leftEdge[0].x, leftEdge[0].y);
 
-        cr.lineTo(
-            midpointX + normalX,
-            midpointY + normalY
-        );
+        for (let index = 1; index < leftEdge.length; index++) {
+            cr.lineTo(
+                leftEdge[index].x,
+                leftEdge[index].y
+            );
+        }
 
-        cr.lineTo(segment.x2, segment.y2);
-
-        cr.lineTo(
-            midpointX - normalX,
-            midpointY - normalY
-        );
+        for (
+            let index = rightEdge.length - 1;
+            index >= 0;
+            index--
+        ) {
+            cr.lineTo(
+                rightEdge[index].x,
+                rightEdge[index].y
+            );
+        }
 
         cr.closePath();
 
