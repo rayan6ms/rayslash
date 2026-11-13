@@ -2,7 +2,9 @@
   "uuid": "rayslash@rayan6ms.github.io",
   "name": "RaySlash",
   "description": "Draw a configurable, ephemeral slash trail over exposed desktop areas. Application windows remain above the effect.",
-  "shell-version": ["50"],
+  "shell-version": ["50", "51"],
+  "version": 2,
+  "version-name": "1.0.1",
   "settings-schema": "org.gnome.shell.extensions.rayslash",
   "url": "https://github.com/rayan6ms/rayslash"
 }

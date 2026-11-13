@@ -22,13 +22,13 @@ The ribbon follows the pointer, uses the current GNOME accent color by default, 
 
 ## Requirements
 
-* GNOME Shell 50
+* GNOME Shell 50 or 51
 * Wayland
 * GJS
 * GTK4
 * Libadwaita
 
-RaySlash was developed and tested on Fedora 44 with GNOME Shell 50.
+RaySlash supports Fedora 44 with GNOME Shell 50 and Fedora 45 with GNOME Shell 51.
 
 ## How it works
 
@@ -95,7 +95,7 @@ After changing the settings schema, compile it with:
 glib-compile-schemas schemas
 ```
 
-For safe testing on GNOME 50, run a nested GNOME Shell:
+For safe testing on GNOME 50 or 51, run a nested GNOME Shell:
 
 ```sh
 G_MESSAGES_DEBUG=all \
